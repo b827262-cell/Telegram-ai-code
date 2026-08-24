@@ -145,6 +145,13 @@ logged, committed, sent to Telegram, or passed to Codex child processes. The
 Meeting Room being offline does not prevent the E500 Bot, `/run*`, `/status`, or
 `/result` from starting and working.
 
+The optional authenticated HTTP API uses `CODEX_API_HOST` / `CODEX_API_PORT` and
+requires a random `CODEX_BRIDGE_API_TOKEN` of at least 32 characters. It exposes
+`GET /health`, `GET /status`, `GET /result/<job_id>`, and `POST /run`; all routes
+require `Authorization: Bearer <CODEX_BRIDGE_API_TOKEN>`. API-submitted jobs use
+the configured Telegram chat ID and are automatically delivered by the same
+Telegram notification outbox when the worker finishes.
+
 Example:
 
 ```text

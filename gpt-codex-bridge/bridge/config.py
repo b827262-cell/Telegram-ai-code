@@ -45,6 +45,18 @@ def _float_env(env: dict[str, str], name: str, default: float, *, minimum: float
     return value
 
 
+def _bool_env(env: dict[str, str], name: str, default: bool = False) -> bool:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be a boolean")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Validated settings shared by adapters, queue, worker, and runner."""
@@ -73,6 +85,11 @@ class Settings:
     claude_timeout_seconds: float = 3600.0
     agy_bin: str = "agy"
     agy_timeout_seconds: float = 3600.0
+    github_report_enabled: bool = False
+    github_cli_bin: str = "gh"
+    github_report_branch: str = "main"
+    github_report_directory: str = "reports/auto-loop"
+    github_report_timeout_seconds: float = 30.0
     configured_secret_values: tuple[str, ...] = field(default=(), repr=False)
 
     @classmethod
@@ -162,6 +179,13 @@ class Settings:
             claude_timeout_seconds=_float_env(values, "CLAUDE_JOB_TIMEOUT_SECONDS", 3600.0),
             agy_bin=values.get("AGY_BIN", "agy"),
             agy_timeout_seconds=_float_env(values, "AGY_JOB_TIMEOUT_SECONDS", 3600.0),
+            github_report_enabled=_bool_env(values, "GITHUB_REPORT_ENABLED", False),
+            github_cli_bin=values.get("GITHUB_CLI_BIN", "gh"),
+            github_report_branch=values.get("GITHUB_REPORT_BRANCH", "main"),
+            github_report_directory=values.get("GITHUB_REPORT_DIRECTORY", "reports/auto-loop"),
+            github_report_timeout_seconds=_float_env(
+                values, "GITHUB_REPORT_TIMEOUT_SECONDS", 30.0
+            ),
             worker_poll_seconds=_float_env(values, "CODEX_WORKER_POLL_SECONDS", 1.0),
             max_prompt_length=_int_env(values, "CODEX_MAX_PROMPT_LENGTH", 12000, minimum=1),
             telegram_bot_token=token,

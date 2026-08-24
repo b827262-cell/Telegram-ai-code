@@ -30,11 +30,11 @@ Telegram adapter drain
 
 AI Meeting commands are proxied from this same E500 Telegram polling process to
 the remote TUF A16 Meeting Room at `http://10.0.3.67:8000`. `/hermes` and
-`/gemini` are Meeting Room requests; `/gpt` is an alias for the local `/run`
-Codex job path; `/agy` is the local agy Google OAuth CLI path and never calls the
-Meeting Room. `/all` and `/roundtable` remain Meeting Room operations and may
-include the remote GPT agent. There must remain only one Telegram polling
-process.
+`/gemini` are Meeting Room requests; `/gpt` starts the durable GPT → AGY →
+Claude workflow; `/agy` and `/claude` are independently scheduled local
+provider jobs and never call the Meeting Room. `/all` and `/roundtable` remain
+Meeting Room operations and may include the remote GPT agent. There must remain
+only one Telegram polling process.
 
 未來的 MCP/HTTP adapter 只需要呼叫同一個 `JobQueue.submit()`；adapter 不得各自啟動 Codex。
 
@@ -42,7 +42,7 @@ process.
 
 - `TELEGRAM_ALLOWED_CHAT_ID` 在解析 message 前比對；未授權更新不回覆、不 enqueue、不執行 Codex。
 - `CODEX_ALLOWED_WORKSPACES` 是明確的絕對路徑 allowlist；Telegram 不提供 `cwd`，所有 Telegram job 都使用 `CODEX_DEFAULT_WORKSPACE`。
-- job 會持久化 `provider`/`runner`；既有 `/gpt` 維持 `codex`，`/claude` 只會 dispatch 到 ClaudeRunner，不會進 Meeting Room 或 CodexRunner。
+- job 會持久化 `provider`/`runner`；`/gpt` 建立 `flow-*`，依序排程 Codex、agy、Claude 三個 job；`/claude` 只會 dispatch 到 ClaudeRunner，不會進 Meeting Room 或 CodexRunner。
 - `/agy` 只會 dispatch 到 AgyRunner；child environment 會移除 `GEMINI_API_KEY` 與 `GOOGLE_API_KEY`，保留 agy 已存在的 Google OAuth credential。程式不執行 `agy login`。
 - worker 使用 SQLite claim guard 加 Unix file lock，最多一個 `running` job。
 - 每個 job 在 SQLite 保存自己的 `sandbox_mode`，只允許 `read-only`、`workspace-write`、`danger-full-access`；未知值直接拒絕。
@@ -66,6 +66,7 @@ bridge/
   codex_runner.py    fixed sandboxed Codex subprocess + report validation
   claude_runner.py   safe non-interactive Claude Code subprocess + report validation
   agy_runner.py      safe agy Google OAuth subprocess + JSON response parsing
+  github_reporter.py report-only GitHub Markdown publisher via gh
   worker.py          single worker loop and process lock
   meeting.py         async HTTP client for the remote TUF A16 Meeting Room
 adapters/
@@ -119,6 +120,7 @@ Supported Telegram commands:
 /run-read <task>
 /run-full <task>
 /result <job_id>
+/workflow <flow_id>
 /claude <task>
 /agy <task>
 
@@ -147,10 +149,22 @@ Meeting Room being offline does not prevent the E500 Bot, `/run*`, `/status`, or
 
 The optional authenticated HTTP API uses `CODEX_API_HOST` / `CODEX_API_PORT` and
 requires a random `CODEX_BRIDGE_API_TOKEN` of at least 32 characters. It exposes
-`GET /health`, `GET /status`, `GET /result/<job_id>`, and `POST /run`; all routes
+`GET /health`, `GET /status`, `GET /result/<job_id>`, `GET /workflow/<flow_id>`,
+`POST /run`, and `POST /workflow`; all routes
 require `Authorization: Bearer <CODEX_BRIDGE_API_TOKEN>`. API-submitted jobs use
 the configured Telegram chat ID and are automatically delivered by the same
 Telegram notification outbox when the worker finishes.
+
+`/gpt <task>` automatically schedules the bounded sequence
+
+```text
+Codex implementation → AGY review → Claude finalization → GitHub Markdown report
+```
+
+Each stage produces its normal Telegram completion notification. When
+`GITHUB_REPORT_ENABLED=true`, the bridge uses the existing authenticated `gh`
+session to upload only a redacted Markdown report under
+`GITHUB_REPORT_DIRECTORY`; it does not automatically push source-code changes.
 
 Example:
 

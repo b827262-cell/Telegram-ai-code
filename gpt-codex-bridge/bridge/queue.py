@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .models import DEFAULT_PROVIDER, Job, Notification, validate_provider
+from .models import DEFAULT_PROVIDER, WORKFLOW_STAGES, Job, Notification, Workflow, validate_provider
 from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
 
@@ -66,6 +66,21 @@ class JobQueue:
                     ON jobs(status, created_at);
                 CREATE INDEX IF NOT EXISTS jobs_chat_created_idx
                     ON jobs(chat_id, created_at);
+                CREATE TABLE IF NOT EXISTS workflows (
+                    id TEXT PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    workspace TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+                    current_stage TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    github_url TEXT,
+                    github_status TEXT,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS workflows_chat_created_idx
+                    ON workflows(chat_id, created_at);
                 """
             )
 
@@ -82,6 +97,12 @@ class JobQueue:
                 )
             if "exit_code" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN exit_code INTEGER")
+            if "workflow_id" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN workflow_id TEXT")
+            if "workflow_stage" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN workflow_stage TEXT")
+            if "workflow_order" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN workflow_order INTEGER")
             for row in connection.execute("SELECT DISTINCT sandbox_mode FROM jobs"):
                 validate_sandbox_mode(row["sandbox_mode"])
             for row in connection.execute("SELECT DISTINCT provider FROM jobs"):
@@ -114,6 +135,9 @@ class JobQueue:
         workspace: Path,
         sandbox_mode: str = DEFAULT_SANDBOX_MODE,
         provider: str = DEFAULT_PROVIDER,
+        workflow_id: str | None = None,
+        workflow_stage: str | None = None,
+        workflow_order: int | None = None,
     ) -> Job:
         validate_sandbox_mode(sandbox_mode)
         validate_provider(provider)
@@ -124,9 +148,10 @@ class JobQueue:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    id, chat_id, prompt, workspace, provider, sandbox_mode, status, created_at
+                    id, chat_id, prompt, workspace, provider, sandbox_mode, status, created_at,
+                    workflow_id, workflow_stage, workflow_order
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -136,11 +161,69 @@ class JobQueue:
                     provider,
                     sandbox_mode,
                     created_at,
+                    workflow_id,
+                    workflow_stage,
+                    workflow_order,
                 ),
             )
         job = self.get(job_id)
         assert job is not None
         return job
+
+    def submit_workflow(
+        self,
+        *,
+        chat_id: str | int,
+        prompt: str,
+        workspace: Path,
+        sandbox_mode: str = DEFAULT_SANDBOX_MODE,
+    ) -> tuple[Workflow, Job]:
+        """Create one durable GPT → AGY → Claude workflow and its first job."""
+
+        validate_sandbox_mode(sandbox_mode)
+        validate_provider(DEFAULT_PROVIDER)
+        workflow_id = f"flow-{uuid.uuid4().hex[:16]}"
+        job_id = f"job-{uuid.uuid4().hex[:16]}"
+        created_at = _now()
+        normalized_workspace = Path(workspace).resolve(strict=False)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO workflows (
+                        id, chat_id, prompt, workspace, status, current_stage, created_at
+                    )
+                    VALUES (?, ?, ?, ?, 'queued', 'gpt', ?)
+                    """,
+                    (workflow_id, str(chat_id), prompt, str(normalized_workspace), created_at),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, chat_id, prompt, workspace, provider, sandbox_mode, status, created_at,
+                        workflow_id, workflow_stage, workflow_order
+                    )
+                    VALUES (?, ?, ?, ?, 'codex', ?, 'queued', ?, ?, 'gpt', 1)
+                    """,
+                    (
+                        job_id,
+                        str(chat_id),
+                        prompt,
+                        str(normalized_workspace),
+                        sandbox_mode,
+                        created_at,
+                        workflow_id,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        workflow = self.get_workflow(workflow_id)
+        job = self.get(job_id)
+        assert workflow is not None and job is not None
+        return workflow, job
 
     def get(self, job_id: str) -> Job | None:
         with self._connection() as connection:
@@ -192,6 +275,15 @@ class JobQueue:
                 "UPDATE jobs SET status = 'running', started_at = ?, error = NULL WHERE id = ?",
                 (started_at, row["id"]),
             )
+            if row["workflow_id"]:
+                connection.execute(
+                    """
+                    UPDATE workflows
+                    SET status = 'running', current_stage = ?, error = NULL
+                    WHERE id = ? AND status IN ('queued', 'running')
+                    """,
+                    (row["workflow_stage"] or "unknown", row["workflow_id"]),
+                )
             connection.commit()
         return self.get(row["id"])
 
@@ -262,6 +354,177 @@ class JobQueue:
             except Exception:
                 connection.rollback()
                 raise
+
+    def get_workflow(self, workflow_id: str) -> Workflow | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
+            ).fetchone()
+        return Workflow.from_row(row) if row else None
+
+    def get_workflow_for_chat(self, workflow_id: str, chat_id: str | int) -> Workflow | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflows WHERE id = ? AND chat_id = ?",
+                (workflow_id, str(chat_id)),
+            ).fetchone()
+        return Workflow.from_row(row) if row else None
+
+    def recent_workflows_for_chat(self, chat_id: str | int, *, limit: int = 5) -> list[Workflow]:
+        if limit < 1:
+            return []
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflows
+                WHERE chat_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (str(chat_id), limit),
+            ).fetchall()
+        return [Workflow.from_row(row) for row in rows]
+
+    def workflow_jobs(self, workflow_id: str) -> list[Job]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE workflow_id = ?
+                ORDER BY workflow_order, created_at, id
+                """,
+                (workflow_id,),
+            ).fetchall()
+        return [Job.from_row(row) for row in rows]
+
+    @staticmethod
+    def _workflow_stage_prompt(original_prompt: str, stage: str, previous_jobs: list[Job]) -> str:
+        previous = ", ".join(
+            f"{job.workflow_stage}:{job.id}" for job in previous_jobs if job.workflow_stage
+        )
+        if stage == "agy":
+            instruction = (
+                "Review the current workspace after the GPT/Codex implementation. "
+                "Do not make production changes, commit, or push. Inspect the diff and tests, "
+                "then report concrete correctness, regression, security, and edge-case findings."
+            )
+        else:
+            instruction = (
+                "Act as the final integrator for the current workspace. Read the GPT implementation "
+                "and AGY review, make only necessary in-scope repairs, run the relevant tests, and "
+                "do not commit or push; the bridge will publish the workflow report separately."
+            )
+        return (
+            f"AUTOMATED WORKFLOW STAGE: {stage.upper()}\n"
+            f"PREVIOUS JOBS: {previous or 'none'}\n"
+            f"ORIGINAL TASK:\n{original_prompt}\n\n"
+            f"STAGE INSTRUCTIONS:\n{instruction}\n\n"
+            "Return a concise structured result with summary, findings/actions, tests, and any "
+            "blockers. Never output credentials or secret values."
+        )
+
+    def advance_workflow(self, job_id: str, *, succeeded: bool) -> tuple[Workflow | None, Job | None, bool]:
+        """Advance a completed workflow stage; return next job or GitHub-publish flag."""
+
+        completed_job = self.get(job_id)
+        if completed_job is None or not completed_job.workflow_id:
+            return None, None, False
+        workflow_id = completed_job.workflow_id
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None, None, False
+                if not succeeded:
+                    connection.execute(
+                        """
+                        UPDATE workflows
+                        SET status = 'failed', finished_at = ?, error = ?, current_stage = ?
+                        WHERE id = ?
+                        """,
+                        (_now(), f"{completed_job.workflow_stage or 'unknown'} stage failed", completed_job.workflow_stage or "unknown", workflow_id),
+                    )
+                    connection.commit()
+                    return self.get_workflow(workflow_id), None, False
+
+                stage = completed_job.workflow_stage
+                if stage not in WORKFLOW_STAGES:
+                    connection.commit()
+                    return self.get_workflow(workflow_id), None, False
+                next_index = WORKFLOW_STAGES.index(stage) + 1
+                if next_index >= len(WORKFLOW_STAGES):
+                    connection.execute(
+                        "UPDATE workflows SET status = 'running', current_stage = 'github', error = NULL WHERE id = ?",
+                        (workflow_id,),
+                    )
+                    connection.commit()
+                    return self.get_workflow(workflow_id), None, True
+
+                next_stage = WORKFLOW_STAGES[next_index]
+                provider = "codex" if next_stage == "gpt" else next_stage
+                jobs = self.workflow_jobs(workflow_id)
+                prompt = self._workflow_stage_prompt(row["prompt"], next_stage, jobs)
+                next_job_id = f"job-{uuid.uuid4().hex[:16]}"
+                created_at = _now()
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, chat_id, prompt, workspace, provider, sandbox_mode, status, created_at,
+                        workflow_id, workflow_stage, workflow_order
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+                    """,
+                    (
+                        next_job_id,
+                        row["chat_id"],
+                        prompt,
+                        row["workspace"],
+                        provider,
+                        completed_job.sandbox_mode,
+                        created_at,
+                        workflow_id,
+                        next_stage,
+                        next_index + 1,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE workflows SET status = 'running', current_stage = ?, error = NULL WHERE id = ?",
+                    (next_stage, workflow_id),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        workflow = self.get_workflow(workflow_id)
+        next_job = self.get(next_job_id)
+        assert workflow is not None and next_job is not None
+        return workflow, next_job, False
+
+    def finish_workflow(
+        self,
+        workflow_id: str,
+        *,
+        succeeded: bool,
+        github_url: str | None = None,
+        github_status: str | None = None,
+        error: str | None = None,
+    ) -> Workflow | None:
+        status = "succeeded" if succeeded else "failed"
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE workflows
+                SET status = ?, current_stage = 'github', finished_at = ?,
+                    github_url = ?, github_status = ?, error = ?
+                WHERE id = ?
+                """,
+                (status, _now(), github_url, github_status, error, workflow_id),
+            )
+        return self.get_workflow(workflow_id)
 
     def get_notification(self, notification_id: int) -> Notification | None:
         with self._connection() as connection:

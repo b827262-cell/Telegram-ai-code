@@ -29,6 +29,7 @@ def make_settings(directory: str) -> Settings:
         {
             "CODEX_ALLOWED_WORKSPACES": str(workspace),
             "CODEX_DEFAULT_WORKSPACE": str(workspace),
+            "CODEX_BRIDGE_DATA_DIR": str(Path(directory) / "state"),
             "TELEGRAM_BOT_TOKEN": "bot-secret",
             "TELEGRAM_ALLOWED_CHAT_ID": "42",
         },
@@ -71,7 +72,7 @@ class TelegramAdapterTests(unittest.TestCase):
             self.assertIn("queued", client.sent[-1][1])
             self.assertEqual(queue.claim_next().sandbox_mode, "workspace-write")
 
-    def test_gpt_alias_enqueues_default_codex_job_without_meeting_call(self) -> None:
+    def test_gpt_starts_automated_workflow_without_meeting_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)
             queue = JobQueue(Path(directory) / "jobs.sqlite3")
@@ -85,13 +86,47 @@ class TelegramAdapterTests(unittest.TestCase):
 
             reply = adapter.handle_update(update("/gpt inspect telegram.py"))
 
-            self.assertTrue(reply.startswith("queued job-"))
-            job = queue.claim_next()
-            self.assertIsNotNone(job)
-            assert job is not None
-            self.assertEqual(job.prompt, "inspect telegram.py")
-            self.assertEqual(job.sandbox_mode, "workspace-write")
+            self.assertTrue(reply.startswith("workflow queued flow-"))
+            workflow_id = reply.splitlines()[0].split()[-1]
+            workflow = queue.get_workflow_for_chat(workflow_id, "42")
+            self.assertIsNotNone(workflow)
+            jobs = queue.workflow_jobs(workflow_id)
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0].workflow_stage, "gpt")
+            self.assertEqual(jobs[0].prompt, "inspect telegram.py")
+            self.assertEqual(jobs[0].sandbox_mode, "workspace-write")
             self.assertEqual(client.sent[-1], ("42", reply))
+
+    def test_workflow_schedules_agy_then_claude_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            workflow, gpt_job = queue.submit_workflow(
+                chat_id=42,
+                prompt="inspect telegram.py",
+                workspace=settings.default_workspace,
+            )
+
+            self.assertEqual(queue.claim_next().id, gpt_job.id)
+            queue.finish(gpt_job.id, succeeded=True, report_path=None, error=None)
+            workflow, agy_job, needs_report = queue.advance_workflow(gpt_job.id, succeeded=True)
+            self.assertFalse(needs_report)
+            self.assertEqual(agy_job.workflow_stage, "agy")
+            self.assertEqual(workflow.current_stage, "agy")
+
+            self.assertEqual(queue.claim_next().id, agy_job.id)
+            queue.finish(agy_job.id, succeeded=True, report_path=None, error=None)
+            workflow, claude_job, needs_report = queue.advance_workflow(agy_job.id, succeeded=True)
+            self.assertFalse(needs_report)
+            self.assertEqual(claude_job.workflow_stage, "claude")
+            self.assertEqual(workflow.current_stage, "claude")
+
+            self.assertEqual(queue.claim_next().id, claude_job.id)
+            queue.finish(claude_job.id, succeeded=True, report_path=None, error=None)
+            workflow, next_job, needs_report = queue.advance_workflow(claude_job.id, succeeded=True)
+            self.assertTrue(needs_report)
+            self.assertIsNone(next_job)
+            self.assertEqual(workflow.current_stage, "github")
 
     def test_run_read_selects_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

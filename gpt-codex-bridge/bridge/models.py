@@ -9,6 +9,7 @@ from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
 DEFAULT_PROVIDER = "codex"
 SUPPORTED_PROVIDERS = frozenset({"agy", "codex", "claude"})
+WORKFLOW_STAGES = ("gpt", "agy", "claude")
 
 
 def validate_provider(provider: str) -> str:
@@ -32,6 +33,9 @@ class Job:
     exit_code: int | None = None
     sandbox_mode: str = DEFAULT_SANDBOX_MODE
     provider: str = DEFAULT_PROVIDER
+    workflow_id: str | None = None
+    workflow_stage: str | None = None
+    workflow_order: int | None = None
 
     def __post_init__(self) -> None:
         validate_sandbox_mode(self.sandbox_mode)
@@ -61,6 +65,45 @@ class Job:
             exit_code=int(data["exit_code"]) if data.get("exit_code") is not None else None,
             sandbox_mode=data["sandbox_mode"],
             provider=data.get("provider", DEFAULT_PROVIDER),
+            workflow_id=data.get("workflow_id"),
+            workflow_stage=data.get("workflow_stage"),
+            workflow_order=(
+                int(data["workflow_order"])
+                if data.get("workflow_order") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Workflow:
+    id: str
+    chat_id: str
+    prompt: str
+    workspace: Path
+    status: str
+    current_stage: str
+    created_at: str
+    finished_at: str | None = None
+    github_url: str | None = None
+    github_status: str | None = None
+    error: str | None = None
+
+    @classmethod
+    def from_row(cls, row: object) -> "Workflow":
+        data = dict(row)
+        return cls(
+            id=data["id"],
+            chat_id=str(data["chat_id"]),
+            prompt=data["prompt"],
+            workspace=Path(data["workspace"]),
+            status=data["status"],
+            current_stage=data["current_stage"],
+            created_at=data["created_at"],
+            finished_at=data.get("finished_at"),
+            github_url=data.get("github_url"),
+            github_status=data.get("github_status"),
+            error=data.get("error"),
         )
 
 

@@ -80,7 +80,6 @@ _COMMAND_RE = re.compile(r"^/(?P<command>[A-Za-z0-9_-]+)(?:@[A-Za-z0-9_]+)?(?:\s
 
 _RUN_COMMAND_MODES = {
     "run": DEFAULT_SANDBOX_MODE,
-    "gpt": DEFAULT_SANDBOX_MODE,
     "run-read": "read-only",
     "run-full": "danger-full-access",
 }
@@ -174,7 +173,7 @@ class TelegramAdapter:
             return None
         match = _COMMAND_RE.fullmatch(text.strip())
         if not match:
-            reply = "請使用 /ping、/run <task>、/gpt <task>、/agy <task>、/claude <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
+            reply = "請使用 /ping、/run <task>、/gpt <task>、/agy <task>、/claude <task>、/run-read <task>、/run-full <task>、/status、/result <job_id> 或 /workflow <flow_id>。"
             self._send_reply(chat_id, reply)
             return reply
         command = match.group("command").lower()
@@ -183,7 +182,8 @@ class TelegramAdapter:
         if command in {"start", "help"}:
             reply = (
                 "Codex job runner 已啟動。使用 /ping、/run <task>、/run-read <task>、"
-                "/run-full <task>、/gpt <task>、/agy <task>、/claude <task>、/status、/result <job_id>。"
+                "/run-full <task>、/gpt <task>、/agy <task>、/claude <task>、/status、"
+                "/result <job_id>、/workflow <flow_id>。/gpt 會依序接 AGY、Claude，最後上傳 GitHub 報告。"
             )
         elif command == "ping":
             reply = "PONG"
@@ -191,6 +191,8 @@ class TelegramAdapter:
             reply = self._status(chat_id)
         elif command in _RUN_COMMAND_MODES:
             reply = self._submit(chat_id, args, _RUN_COMMAND_MODES[command], command)
+        elif command == "gpt":
+            reply = self._submit_workflow(chat_id, args)
         elif command == "claude":
             reply = self._submit(
                 chat_id,
@@ -209,11 +211,13 @@ class TelegramAdapter:
             )
         elif command == "result":
             reply = self._result(chat_id, args)
+        elif command == "workflow":
+            reply = self._workflow_result(chat_id, args)
         elif command in _MEETING_COMMANDS:
             reply = await self._meeting_reply(message, chat_id, command, args)
         else:
             reply = (
-                "未知命令。可用：/ping、/run、/gpt、/agy、/claude、/run-read、/run-full、/status、/result、"
+                "未知命令。可用：/ping、/run、/gpt、/agy、/claude、/run-read、/run-full、/status、/result、/workflow、"
                 "/hermes、/gemini、/all、/roundtable、/agents、/meeting-status、"
                 "/meeting-stop、/meeting-reset。"
             )
@@ -336,7 +340,32 @@ class TelegramAdapter:
             )
         else:
             lines.append("sandbox_mode=none")
+        workflows = self.queue.recent_workflows_for_chat(chat_id)
+        if workflows:
+            lines.append("recent workflows:")
+            lines.extend(
+                f"{workflow.id}: {workflow.status} stage={workflow.current_stage} "
+                f"github={workflow.github_status or 'pending'}"
+                for workflow in workflows
+            )
         return "\n".join(lines)
+
+    def _submit_workflow(self, chat_id: str, prompt: str) -> str:
+        if not prompt:
+            return "用法：/gpt <task>（完成後自動接 /agy、/claude 並上傳 GitHub 報告）"
+        if len(prompt) > self.settings.max_prompt_length:
+            return f"task 太長；上限為 {self.settings.max_prompt_length} 字元。"
+        workflow, job = self.queue.submit_workflow(
+            chat_id=chat_id,
+            prompt=prompt,
+            workspace=self.settings.default_workspace,
+            sandbox_mode=DEFAULT_SANDBOX_MODE,
+        )
+        return (
+            f"workflow queued {workflow.id}\n"
+            f"stage=gpt job={job.id}\n"
+            "next=agy → claude → github report"
+        )
 
     def _submit(
         self,
@@ -396,6 +425,28 @@ class TelegramAdapter:
             f"needs_attention: {attention}"
         )
 
+    def _workflow_result(self, chat_id: str, workflow_id: str) -> str:
+        if not workflow_id or not re.fullmatch(r"flow-[a-f0-9]{16}", workflow_id):
+            return "用法：/workflow <flow_id>"
+        workflow = self.queue.get_workflow_for_chat(workflow_id, chat_id)
+        if workflow is None:
+            return "找不到這個 workflow。"
+        lines = [
+            f"{workflow.id}: {workflow.status}",
+            f"current_stage: {workflow.current_stage}",
+        ]
+        if workflow.github_status:
+            lines.append(f"github_report: {workflow.github_status}")
+        if workflow.github_url:
+            lines.append(f"github_url: {workflow.github_url}")
+        if workflow.error:
+            lines.append(f"error: {self._safe_short(workflow.error)}")
+        for job in self.queue.workflow_jobs(workflow.id):
+            lines.append(
+                f"{job.workflow_stage or job.provider}: {job.id} {job.status}"
+            )
+        return "\n".join(lines)
+
     @staticmethod
     def _load_report(job: Job) -> dict[str, Any] | None:
         if job.report_path is None or not job.report_path.is_file():
@@ -453,6 +504,17 @@ class TelegramAdapter:
             f"Workspace: {job.workspace}\n"
             f"Exit code: {exit_code}"
         )
+        workflow = self.queue.get_workflow(job.workflow_id) if job.workflow_id else None
+        if workflow is not None:
+            details += (
+                f"\n\nWorkflow: {workflow.id}\n"
+                f"Stage: {job.workflow_stage or 'unknown'}\n"
+                f"Workflow status: {workflow.status}"
+            )
+            if workflow.github_status:
+                details += f"\nGitHub report: {workflow.github_status}"
+            if workflow.github_url:
+                details += f"\nGitHub URL: {workflow.github_url}"
         if notification.event_type == "succeeded":
             return (
                 f"✅ {provider_label} job completed\n\n"

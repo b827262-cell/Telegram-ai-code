@@ -74,7 +74,24 @@ def _job_payload(settings: Settings, job: Any) -> dict[str, Any]:
         "finished_at": job.finished_at,
         "error": settings.redact_text(job.error or "") or None,
         "exit_code": job.exit_code,
+        "workflow_id": job.workflow_id,
+        "workflow_stage": job.workflow_stage,
+        "workflow_order": job.workflow_order,
         "report": _report_values(settings, job.report_path),
+    }
+
+
+def _workflow_payload(settings: Settings, queue: JobQueue, workflow: Any) -> dict[str, Any]:
+    return {
+        "id": workflow.id,
+        "status": workflow.status,
+        "current_stage": workflow.current_stage,
+        "created_at": workflow.created_at,
+        "finished_at": workflow.finished_at,
+        "github_url": settings.redact_text(workflow.github_url or "") or None,
+        "github_status": workflow.github_status,
+        "error": settings.redact_text(workflow.error or "") or None,
+        "jobs": [_job_payload(settings, job) for job in queue.workflow_jobs(workflow.id)],
     }
 
 
@@ -148,13 +165,34 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
         if path == "/status":
             chat_id = self.api_settings.telegram_allowed_chat_id
             recent = self.queue.recent_for_chat(chat_id, limit=20) if chat_id else []
+            workflows = self.queue.recent_workflows_for_chat(chat_id, limit=10) if chat_id else []
             self._send(
                 HTTPStatus.OK,
                 {
                     "ok": True,
                     "counts": self.queue.counts(),
                     "recent": [_job_payload(self.api_settings, job) for job in recent],
+                    "workflows": [
+                        _workflow_payload(self.api_settings, self.queue, workflow)
+                        for workflow in workflows
+                    ],
                 },
+            )
+            return
+        if path.startswith("/workflow/"):
+            workflow_id = unquote(path.removeprefix("/workflow/"))
+            chat_id = self.api_settings.telegram_allowed_chat_id
+            workflow = (
+                self.queue.get_workflow_for_chat(workflow_id, chat_id)
+                if chat_id
+                else None
+            )
+            if workflow is None:
+                self._send(HTTPStatus.NOT_FOUND, {"ok": False, "code": "WORKFLOW_NOT_FOUND"})
+                return
+            self._send(
+                HTTPStatus.OK,
+                {"ok": True, "workflow": _workflow_payload(self.api_settings, self.queue, workflow)},
             )
             return
         if path.startswith("/result/"):
@@ -172,7 +210,8 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._send(HTTPStatus.UNAUTHORIZED, {"ok": False, "code": "BRIDGE_UNAUTHORIZED"})
             return
-        if urlsplit(self.path).path != "/run":
+        path = urlsplit(self.path).path
+        if path not in {"/run", "/workflow"}:
             self._send(HTTPStatus.NOT_FOUND, {"ok": False, "code": "NOT_FOUND"})
             return
         try:
@@ -195,12 +234,28 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
             sandbox_mode = MODE_TO_SANDBOX.get(mode)
             if sandbox_mode is None:
                 validate_sandbox_mode(mode)
+            workspace = settings.validate_workspace(settings.default_workspace)
+            if path == "/workflow":
+                workflow, job = self.queue.submit_workflow(
+                    chat_id=allowed_chat_id,
+                    prompt=task.strip(),
+                    workspace=workspace,
+                    sandbox_mode=sandbox_mode or "workspace-write",
+                )
+                self._send(
+                    HTTPStatus.ACCEPTED,
+                    {
+                        "ok": True,
+                        "workflow": _workflow_payload(settings, self.queue, workflow),
+                        "job": _job_payload(settings, job),
+                    },
+                )
+                return
             provider = str(body.get("provider") or "codex").lower()
             if provider == "gpt":
                 provider = "codex"
             if provider not in SUPPORTED_PROVIDERS:
                 raise ValueError(f"unsupported provider: {provider}")
-            workspace = settings.validate_workspace(settings.default_workspace)
             job = self.queue.submit(
                 chat_id=allowed_chat_id,
                 prompt=task.strip(),

@@ -24,7 +24,7 @@ from bridge.meeting import (
     summary_text,
 )
 from bridge.models import Job, Notification
-from bridge.queue import JobQueue
+from bridge.queue import CodexExecAlreadyRunning, JobQueue
 from bridge.sandbox import (
     DEFAULT_SANDBOX_MODE,
     SandboxModeError,
@@ -355,12 +355,24 @@ class TelegramAdapter:
             return "用法：/gpt <task>（完成後自動接 /agy、/claude 並上傳 GitHub 報告）"
         if len(prompt) > self.settings.max_prompt_length:
             return f"task 太長；上限為 {self.settings.max_prompt_length} 字元。"
-        workflow, job = self.queue.submit_workflow(
-            chat_id=chat_id,
-            prompt=prompt,
-            workspace=self.settings.default_workspace,
-            sandbox_mode=DEFAULT_SANDBOX_MODE,
-        )
+        try:
+            workflow, job = self.queue.submit_workflow(
+                chat_id=chat_id,
+                prompt=prompt,
+                workspace=self.settings.default_workspace,
+                sandbox_mode=DEFAULT_SANDBOX_MODE,
+            )
+        except CodexExecAlreadyRunning as exc:
+            lines = [
+                "Codex exec 執行中，/gpt 尚未派送。",
+                "請先評估目前任務，再重新執行 /gpt。",
+            ]
+            lines.extend(
+                f"running job={running.id} workflow={running.workflow_id or 'standalone'} "
+                f"stage={running.workflow_stage or 'gpt'} started={running.started_at or 'unknown'}"
+                for running in exc.jobs
+            )
+            return "\n".join(lines)
         return (
             f"workflow queued {workflow.id}\n"
             f"stage=gpt job={job.id}\n"

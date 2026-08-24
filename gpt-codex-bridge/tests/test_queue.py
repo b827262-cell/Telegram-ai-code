@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 import unittest
 
-from bridge.queue import JobQueue
+from bridge.queue import CodexExecAlreadyRunning, JobQueue
 from bridge.sandbox import SandboxModeError
 
 
@@ -104,6 +104,22 @@ class QueueTests(unittest.TestCase):
             self.assertIsNone(queue.claim_next())
             queue.finish(first.id, succeeded=True, report_path=None, error=None)
             self.assertEqual(queue.claim_next().id, second.id)
+
+    def test_workflow_rejects_when_codex_exec_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            running = queue.submit(chat_id=1, prompt="existing", workspace=Path(directory))
+            self.assertEqual(queue.claim_next().id, running.id)
+
+            with self.assertRaises(CodexExecAlreadyRunning) as raised:
+                queue.submit_workflow(
+                    chat_id=1,
+                    prompt="new workflow",
+                    workspace=Path(directory),
+                )
+
+            self.assertEqual([job.id for job in raised.exception.jobs], [running.id])
+            self.assertEqual(queue.recent_workflows_for_chat(1), [])
 
     def test_result_is_scoped_to_chat_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

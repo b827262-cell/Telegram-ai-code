@@ -97,6 +97,22 @@ class TelegramAdapterTests(unittest.TestCase):
             self.assertEqual(jobs[0].sandbox_mode, "workspace-write")
             self.assertEqual(client.sent[-1], ("42", reply))
 
+    def test_gpt_reports_running_codex_job_without_enqueuing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            client = FakeClient()
+            adapter = TelegramAdapter(settings, queue, client)
+            running = queue.submit(chat_id=42, prompt="existing codex task", workspace=settings.default_workspace)
+            queue.claim_next()
+
+            reply = adapter.handle_update(update("/gpt start another workflow"))
+
+            self.assertIn("Codex exec 執行中", reply)
+            self.assertIn(running.id, reply)
+            self.assertEqual(queue.recent_workflows_for_chat("42"), [])
+            self.assertEqual(client.sent[-1], ("42", reply))
+
     def test_workflow_schedules_agy_then_claude_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)

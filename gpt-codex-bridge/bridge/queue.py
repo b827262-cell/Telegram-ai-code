@@ -18,6 +18,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class CodexExecAlreadyRunning(RuntimeError):
+    """Raised when a new workflow is requested while Codex is already running."""
+
+    def __init__(self, jobs: tuple[Job, ...]):
+        self.jobs = jobs
+        super().__init__("a Codex exec job is already running")
+
+
 class JobQueue:
     """Persistent queue. Every database operation uses a short-lived connection."""
 
@@ -188,6 +196,16 @@ class JobQueue:
         normalized_workspace = Path(workspace).resolve(strict=False)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            running_rows = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE status = 'running' AND provider = 'codex'
+                ORDER BY started_at, created_at, id
+                """
+            ).fetchall()
+            if running_rows:
+                connection.commit()
+                raise CodexExecAlreadyRunning(tuple(Job.from_row(row) for row in running_rows))
             try:
                 connection.execute(
                     """

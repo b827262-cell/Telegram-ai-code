@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 
 from .config import Settings
 from .models import SUPPORTED_PROVIDERS
-from .queue import JobQueue
+from .queue import CodexExecAlreadyRunning, JobQueue
 from .sandbox import validate_sandbox_mode
 
 
@@ -264,6 +264,16 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
                 provider=provider,
             )
             self._send(HTTPStatus.ACCEPTED, {"ok": True, "job": _job_payload(settings, job)})
+        except CodexExecAlreadyRunning as exc:
+            self._send(
+                HTTPStatus.CONFLICT,
+                {
+                    "ok": False,
+                    "code": "CODEX_EXEC_RUNNING",
+                    "message": "已有 Codex exec 正在執行，/gpt 尚未派送。",
+                    "running_jobs": [_job_payload(self.api_settings, job) for job in exc.jobs],
+                },
+            )
         except (ValueError, TypeError) as exc:
             self._send(HTTPStatus.BAD_REQUEST, {"ok": False, "code": "REQUEST_INVALID", "message": str(exc)})
         except Exception:

@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from adapters.telegram import TelegramAdapter
+from adapters.telegram import TelegramAdapter, TelegramClient
 from bridge.config import Settings
 from bridge.queue import JobQueue
 
@@ -31,6 +31,7 @@ def make_settings(directory: str) -> Settings:
         {
             "CODEX_ALLOWED_WORKSPACES": str(workspace),
             "CODEX_DEFAULT_WORKSPACE": str(workspace),
+            "CODEX_BRIDGE_DATA_DIR": str(Path(directory) / "state"),
             "TELEGRAM_BOT_TOKEN": "bot-secret",
             "TELEGRAM_ALLOWED_CHAT_ID": "42",
         },
@@ -70,6 +71,70 @@ def finish_job(
 
 
 class NotificationOutboxTests(unittest.TestCase):
+    def test_legacy_notification_schema_adds_dead_letter_marker_without_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "jobs.sqlite3"
+            with sqlite3.connect(db) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE jobs (
+                        id TEXT PRIMARY KEY,
+                        chat_id TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        workspace TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        report_path TEXT,
+                        error TEXT
+                    );
+                    INSERT INTO jobs (
+                        id, chat_id, prompt, workspace, status, created_at
+                    ) VALUES (
+                        'job-0123456789abcdef', '42', 'legacy', '/tmp', 'failed', 'old'
+                    );
+                    CREATE TABLE notifications (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL CHECK (event_type IN ('succeeded', 'failed')),
+                        status TEXT NOT NULL CHECK (status IN ('pending', 'sent')),
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        sent_at TEXT,
+                        last_error TEXT,
+                        FOREIGN KEY (job_id) REFERENCES jobs(id),
+                        UNIQUE (job_id, chat_id, event_type)
+                    );
+                    INSERT INTO notifications (
+                        job_id, chat_id, event_type, status, attempts, created_at, last_error
+                    ) VALUES (
+                        'job-0123456789abcdef', '42', 'failed', 'pending', 9, 'old',
+                        'HTTPError: HTTP Error 400: Bad Request'
+                    );
+                    """
+                )
+
+            queue = JobQueue(db)
+
+            with sqlite3.connect(db) as connection:
+                columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(notifications)")
+                }
+                table_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notifications'"
+                ).fetchone()[0]
+            self.assertIn("dead_lettered_at", columns)
+            self.assertIn("CHECK (status IN ('pending', 'sent'))", table_sql)
+            notification = queue.get_notification(1)
+            self.assertEqual(notification.status, "pending")
+            self.assertEqual(notification.attempts, 9)
+            self.assertEqual(
+                notification.last_error,
+                "HTTPError: HTTP Error 400: Bad Request",
+            )
+
     def test_historical_terminal_jobs_are_not_backfilled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "jobs.sqlite3"
@@ -228,6 +293,31 @@ class NotificationOutboxTests(unittest.TestCase):
             self.assertIn("Error: Codex failed while handling [REDACTED]", text)
             self.assertNotIn("bot-secret", text)
 
+    def test_operator_cancellation_notification_is_not_reported_as_provider_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            job = finish_job(
+                queue,
+                settings,
+                succeeded=False,
+                error=(
+                    "CANCELLED_BY_OPERATOR: Prompt length boundary test only; "
+                    "not authorized for execution."
+                ),
+                exit_code=None,
+            )
+            client = FakeNotificationClient()
+            adapter = TelegramAdapter(settings, queue, client)
+
+            self.assertEqual(adapter.drain_notifications(), 1)
+            text = client.sent[0][1]
+            self.assertIn("⏹️ Codex job cancelled", text)
+            self.assertIn("Status: cancelled", text)
+            self.assertIn("not authorized for execution", text)
+            self.assertNotIn("❌ Codex job failed", text)
+            self.assertNotIn("execution started", text)
+
     def test_notification_splits_long_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)
@@ -284,6 +374,115 @@ class NotificationOutboxTests(unittest.TestCase):
             self.assertNotIn("bot-secret", client.sent[0][1])
             self.assertIn("Sandbox: danger-full-access", client.sent[0][1])
             self.assertIn("Error: failure contains [REDACTED]", client.sent[0][1])
+
+    def test_permanent_telegram_400_is_dead_lettered_and_stops_retrying(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            finish_job(queue, settings, succeeded=False, error="provider failed", exit_code=7)
+
+            def transport(_method: str, _payload: dict) -> dict:
+                return {
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request contains bot-secret",
+                }
+
+            adapter = TelegramAdapter(
+                settings,
+                queue,
+                TelegramClient("bot-secret", transport=transport),
+            )
+
+            self.assertEqual(adapter.drain_notifications(), 0)
+            notification = queue.get_notification(1)
+            self.assertEqual(notification.status, "dead_lettered")
+            self.assertEqual(notification.attempts, 1)
+            self.assertIsNotNone(notification.dead_lettered_at)
+            self.assertEqual(queue.pending_notifications(), [])
+            self.assertNotIn("bot-secret", notification.last_error)
+
+            self.assertEqual(adapter.drain_notifications(), 0)
+            self.assertEqual(queue.get_notification(1).attempts, 1)
+
+    def test_telegram_429_remains_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            finish_job(queue, settings, succeeded=True, exit_code=0)
+            client = TelegramClient(
+                "bot-secret",
+                transport=lambda _method, _payload: {
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests",
+                    "parameters": {"retry_after": 30},
+                },
+            )
+
+            self.assertEqual(TelegramAdapter(settings, queue, client).drain_notifications(), 0)
+            notification = queue.get_notification(1)
+            self.assertEqual(notification.status, "pending")
+            self.assertEqual(notification.attempts, 1)
+            self.assertIsNone(notification.dead_lettered_at)
+            self.assertEqual(len(queue.pending_notifications()), 1)
+
+    def test_telegram_5xx_and_network_failures_remain_retryable(self) -> None:
+        for failure_kind in ("5xx", "network"):
+            with self.subTest(failure_kind=failure_kind), tempfile.TemporaryDirectory() as directory:
+                settings = make_settings(directory)
+                queue = JobQueue(Path(directory) / "jobs.sqlite3")
+                finish_job(queue, settings, succeeded=False, error="provider failed", exit_code=7)
+
+                def transport(_method: str, _payload: dict) -> dict:
+                    if failure_kind == "network":
+                        raise OSError("network unavailable")
+                    return {
+                        "ok": False,
+                        "error_code": 500,
+                        "description": "Internal Server Error",
+                    }
+
+                adapter = TelegramAdapter(
+                    settings,
+                    queue,
+                    TelegramClient("bot-secret", transport=transport),
+                )
+                self.assertEqual(adapter.drain_notifications(), 0)
+                notification = queue.get_notification(1)
+                self.assertEqual(notification.status, "pending")
+                self.assertEqual(notification.attempts, 1)
+                self.assertIsNone(notification.dead_lettered_at)
+                self.assertEqual(len(queue.pending_notifications()), 1)
+
+    def test_operator_dead_letter_preserves_legacy_audit_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            job = finish_job(
+                queue,
+                settings,
+                succeeded=False,
+                error="Codex runner failed unexpectedly",
+                exit_code=-1,
+            )
+            diagnostic = "HTTPError: HTTP Error 400: Bad Request"
+            queue.mark_notification_failed(1, diagnostic)
+            before = queue.get_notification(1)
+
+            repaired = queue.dead_letter_notification(
+                1,
+                increment_attempt=False,
+                expected_job_id=job.id,
+                expected_event_type="failed",
+                expected_last_error=diagnostic,
+            )
+
+            self.assertEqual(repaired.status, "dead_lettered")
+            self.assertEqual(repaired.attempts, before.attempts)
+            self.assertEqual(repaired.created_at, before.created_at)
+            self.assertEqual(repaired.last_error, before.last_error)
+            self.assertEqual(queue.pending_notifications(), [])
 
     def test_adapter_restart_resends_pending_notification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -12,7 +12,7 @@ import re
 import signal
 import time
 from typing import Any, Callable
-from urllib import request
+from urllib import error as urlerror, request
 
 from bridge.config import Settings
 from bridge.meeting import (
@@ -24,7 +24,7 @@ from bridge.meeting import (
     summary_text,
 )
 from bridge.models import Job, Notification
-from bridge.queue import CodexExecAlreadyRunning, JobQueue
+from bridge.queue import CANCELLED_BY_OPERATOR_PREFIX, CodexExecAlreadyRunning, JobQueue
 from bridge.sandbox import (
     DEFAULT_SANDBOX_MODE,
     SandboxModeError,
@@ -34,6 +34,20 @@ from bridge.sandbox import (
 
 class TelegramAPIError(RuntimeError):
     """Raised when the Telegram API returns an unsuccessful response."""
+
+    _RETRYABLE_4XX = frozenset({408, 409, 425, 429})
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def is_permanent_delivery_failure(self) -> bool:
+        return (
+            self.status_code is not None
+            and 400 <= self.status_code < 500
+            and self.status_code not in self._RETRYABLE_4XX
+        )
 
 
 @dataclass
@@ -55,10 +69,22 @@ class TelegramClient:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with request.urlopen(http_request, timeout=self.request_timeout) as result:
-                response = json.loads(result.read().decode("utf-8"))
+            try:
+                with request.urlopen(http_request, timeout=self.request_timeout) as result:
+                    response = json.loads(result.read().decode("utf-8"))
+            except urlerror.HTTPError as exc:
+                raise TelegramAPIError(
+                    f"Telegram API HTTP {exc.code}", status_code=exc.code
+                ) from None
         if not isinstance(response, dict) or response.get("ok") is not True:
-            raise TelegramAPIError("Telegram API request failed")
+            raw_status = response.get("error_code") if isinstance(response, dict) else None
+            status_code = raw_status if isinstance(raw_status, int) else None
+            message = (
+                f"Telegram API HTTP {status_code}"
+                if status_code is not None
+                else "Telegram API request failed"
+            )
+            raise TelegramAPIError(message, status_code=status_code)
         return response
 
     def delete_webhook(self) -> None:
@@ -490,6 +516,7 @@ class TelegramAdapter:
         job = self.queue.get(notification.job_id)
         if job is None:
             raise ValueError("notification job does not exist")
+        is_cancelled = (job.error or "").startswith(CANCELLED_BY_OPERATOR_PREFIX)
         exit_code = job.exit_code if job.exit_code is not None else "unknown"
         report = self._load_report(job)
         if report is None:
@@ -500,7 +527,13 @@ class TelegramAdapter:
             attention = "yes"
         else:
             summary, changed_text, attention = self._report_values(report)
-        status = "succeeded" if notification.event_type == "succeeded" else "failed"
+        status = (
+            "cancelled"
+            if is_cancelled
+            else "succeeded"
+            if notification.event_type == "succeeded"
+            else "failed"
+        )
         provider_label = {"agy": "AGY", "codex": "Codex", "claude": "Claude"}.get(
             job.provider, "AI"
         )
@@ -521,12 +554,19 @@ class TelegramAdapter:
             details += (
                 f"\n\nWorkflow: {workflow.id}\n"
                 f"Stage: {job.workflow_stage or 'unknown'}\n"
-                f"Workflow status: {workflow.status}"
+                f"Workflow status: {'cancelled' if is_cancelled else workflow.status}"
             )
             if workflow.github_status:
                 details += f"\nGitHub report: {workflow.github_status}"
             if workflow.github_url:
                 details += f"\nGitHub URL: {workflow.github_url}"
+        if is_cancelled:
+            return (
+                f"⏹️ {provider_label} job cancelled\n\n"
+                f"{details}\n"
+                f"Reason: {self._safe_short(job.error or 'operator cancellation')}\n\n"
+                f"/result {job.id}"
+            )
         if notification.event_type == "succeeded":
             return (
                 f"✅ {provider_label} job completed\n\n"
@@ -541,7 +581,7 @@ class TelegramAdapter:
         )
 
     def drain_notifications(self, *, limit: int = 20) -> int:
-        """Deliver pending outbox rows and leave failed sends retryable."""
+        """Deliver pending rows, retry transient errors, and dead-letter permanent 4xx."""
 
         delivered = 0
         for notification in self.queue.pending_notifications(limit=limit):
@@ -549,10 +589,19 @@ class TelegramAdapter:
                 text = self._notification_text(notification)
                 self._send_reply(notification.chat_id, text)
             except Exception as exc:
-                self.queue.mark_notification_failed(
-                    notification.id,
-                    self._safe_short(f"{type(exc).__name__}: {exc}", limit=500),
+                last_error = self._safe_short(
+                    f"{type(exc).__name__}: {exc}", limit=500
                 )
+                if (
+                    isinstance(exc, TelegramAPIError)
+                    and exc.is_permanent_delivery_failure
+                ):
+                    self.queue.dead_letter_notification(
+                        notification.id,
+                        last_error=last_error,
+                    )
+                else:
+                    self.queue.mark_notification_failed(notification.id, last_error)
                 continue
             if self.queue.mark_notification_sent(notification.id):
                 delivered += 1

@@ -50,7 +50,7 @@ only one Telegram polling process.
 - Telegram adapter 沒有 raw shell API；`/run` 是 Codex task，不是 shell command endpoint。
 - `/claude` 使用 `claude -p <prompt>`（argv-based，`shell=False`）；不使用 `--dangerously-skip-permissions`，也不啟動第二個 Telegram polling process。
 - worker 不呼叫 Telegram API；job terminal update 與 `notifications.pending` 建立在同一個 SQLite transaction。
-- Telegram adapter 定期 drain pending notifications；送出失敗會保留 retryable row，adapter restart/system reboot 後繼續補送。
+- Telegram adapter 定期 drain pending notifications；網路、5xx、429 等暫時性失敗會保留 retryable row，永久 Telegram 4xx 則保留原 row 與診斷並標記 `dead_lettered_at`，不再無限重試。
 - 功能啟用前已 terminal 的歷史 job 不會被回補通知；notification outbox 只在新的 terminal transition 時建立。
 - Bot token 與未來 MCP bearer token 只從 environment/systemd credentials 讀取，不寫入 Git、log 或 report；傳給 Codex 的 child environment 會移除 inbound adapter credentials。
 - 不開 inbound TCP port。Telegram 啟動時會呼叫 `deleteWebhook`，之後使用官方 `getUpdates` long polling。

@@ -118,18 +118,21 @@ class Notification:
     created_at: str
     sent_at: str | None = None
     last_error: str | None = None
+    dead_lettered_at: str | None = None
 
     @classmethod
     def from_row(cls, row: object) -> "Notification":
         data = dict(row)
+        dead_lettered_at = data.get("dead_lettered_at")
         return cls(
             id=int(data["id"]),
             job_id=data["job_id"],
             chat_id=str(data["chat_id"]),
             event_type=data["event_type"],
-            status=data["status"],
+            status="dead_lettered" if dead_lettered_at else data["status"],
             attempts=int(data["attempts"]),
             created_at=data["created_at"],
             sent_at=data.get("sent_at"),
             last_error=data.get("last_error"),
+            dead_lettered_at=dead_lettered_at,
         )

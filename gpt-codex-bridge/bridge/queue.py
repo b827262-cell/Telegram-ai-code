@@ -14,6 +14,9 @@ from .models import DEFAULT_PROVIDER, WORKFLOW_STAGES, Job, Notification, Workfl
 from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
 
+CANCELLED_BY_OPERATOR_PREFIX = "CANCELLED_BY_OPERATOR:"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -24,6 +27,10 @@ class CodexExecAlreadyRunning(RuntimeError):
     def __init__(self, jobs: tuple[Job, ...]):
         self.jobs = jobs
         super().__init__("a Codex exec job is already running")
+
+
+class QueueTransitionConflict(RuntimeError):
+    """Raised when an operator transition cannot safely be applied."""
 
 
 class JobQueue:
@@ -127,11 +134,25 @@ class JobQueue:
                     created_at TEXT NOT NULL,
                     sent_at TEXT,
                     last_error TEXT,
+                    dead_lettered_at TEXT,
                     FOREIGN KEY (job_id) REFERENCES jobs(id),
                     UNIQUE (job_id, chat_id, event_type)
                 );
                 CREATE INDEX IF NOT EXISTS notifications_pending_created_idx
                     ON notifications(status, created_at);
+                """
+            )
+            notification_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(notifications)")
+            }
+            if "dead_lettered_at" not in notification_columns:
+                connection.execute(
+                    "ALTER TABLE notifications ADD COLUMN dead_lettered_at TEXT"
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS notifications_delivery_created_idx
+                ON notifications(status, dead_lettered_at, created_at)
                 """
             )
 
@@ -242,6 +263,87 @@ class JobQueue:
         job = self.get(job_id)
         assert workflow is not None and job is not None
         return workflow, job
+
+    def cancel_queued_workflow(self, workflow_id: str, reason: str) -> tuple[Workflow, Job]:
+        """Cancel one untouched queued workflow without claiming or notifying it.
+
+        The persisted status remains ``failed`` because the existing schema does not
+        have a cancelled state. ``CANCELLED_BY_OPERATOR:`` in ``error`` is the
+        machine-readable cancellation marker used by the UI and notification layer.
+        """
+
+        normalized_reason = " ".join(str(reason).split())
+        if not normalized_reason:
+            raise ValueError("cancellation reason is required")
+        cancellation_error = f"{CANCELLED_BY_OPERATOR_PREFIX} {normalized_reason}"
+        finished_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                workflow_row = connection.execute(
+                    "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
+                ).fetchone()
+                if workflow_row is None:
+                    raise QueueTransitionConflict("workflow does not exist")
+                if workflow_row["status"] != "queued":
+                    raise QueueTransitionConflict(
+                        f"workflow is not queued: {workflow_row['status']}"
+                    )
+
+                job_rows = connection.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE workflow_id = ?
+                    ORDER BY workflow_order, created_at, id
+                    """,
+                    (workflow_id,),
+                ).fetchall()
+                if len(job_rows) != 1 or job_rows[0]["status"] != "queued":
+                    raise QueueTransitionConflict(
+                        "workflow must contain exactly one queued job"
+                    )
+                job_row = job_rows[0]
+
+                job_cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed', finished_at = ?, error = ?, exit_code = NULL
+                    WHERE id = ? AND workflow_id = ? AND status = 'queued'
+                    """,
+                    (
+                        finished_at,
+                        cancellation_error,
+                        job_row["id"],
+                        workflow_id,
+                    ),
+                )
+                if job_cursor.rowcount != 1:
+                    raise QueueTransitionConflict("job changed before cancellation")
+
+                workflow_cursor = connection.execute(
+                    """
+                    UPDATE workflows
+                    SET status = 'failed', current_stage = ?, finished_at = ?, error = ?
+                    WHERE id = ? AND status = 'queued'
+                    """,
+                    (
+                        workflow_row["current_stage"],
+                        finished_at,
+                        cancellation_error,
+                        workflow_id,
+                    ),
+                )
+                if workflow_cursor.rowcount != 1:
+                    raise QueueTransitionConflict("workflow changed before cancellation")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        cancelled_workflow = self.get_workflow(workflow_id)
+        cancelled_job = self.get(job_row["id"])
+        assert cancelled_workflow is not None and cancelled_job is not None
+        return cancelled_workflow, cancelled_job
 
     def get(self, job_id: str) -> Job | None:
         with self._connection() as connection:
@@ -379,6 +481,111 @@ class JobQueue:
                 "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
             ).fetchone()
         return Workflow.from_row(row) if row else None
+
+    def reconcile_failed_workflow(
+        self,
+        workflow_id: str,
+        *,
+        expected_job_id: str | None = None,
+        expected_job_error: str | None = None,
+        expected_exit_code: int | None = None,
+    ) -> tuple[Workflow, Job]:
+        """Finish a stale workflow whose terminal job is already failed.
+
+        This operator repair never claims, reruns, or modifies a job. It accepts
+        only an active workflow with no active jobs, exactly one terminal failed
+        job, succeeded prior jobs, and a matching current stage. Repeating the
+        same repair after the workflow is failed is a no-op.
+        """
+
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                workflow_row = connection.execute(
+                    "SELECT * FROM workflows WHERE id = ?", (workflow_id,)
+                ).fetchone()
+                if workflow_row is None:
+                    raise QueueTransitionConflict("workflow does not exist")
+                if workflow_row["status"] not in {"queued", "running", "failed"}:
+                    raise QueueTransitionConflict(
+                        f"workflow is not reconcilable: {workflow_row['status']}"
+                    )
+
+                job_rows = connection.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE workflow_id = ?
+                    ORDER BY workflow_order, created_at, id
+                    """,
+                    (workflow_id,),
+                ).fetchall()
+                if not job_rows:
+                    raise QueueTransitionConflict("workflow has no jobs")
+                if any(row["status"] in {"queued", "running"} for row in job_rows):
+                    raise QueueTransitionConflict("workflow still has an active job")
+
+                terminal_job = job_rows[-1]
+                if terminal_job["status"] != "failed":
+                    raise QueueTransitionConflict("terminal workflow job is not failed")
+                if any(row["status"] != "succeeded" for row in job_rows[:-1]):
+                    raise QueueTransitionConflict(
+                        "workflow history before the terminal job is not succeeded"
+                    )
+                if terminal_job["finished_at"] is None:
+                    raise QueueTransitionConflict("terminal failed job has no finish time")
+                terminal_stage = terminal_job["workflow_stage"] or "unknown"
+                if workflow_row["current_stage"] != terminal_stage:
+                    raise QueueTransitionConflict(
+                        "workflow current stage does not match terminal failed job"
+                    )
+                if expected_job_id is not None and terminal_job["id"] != expected_job_id:
+                    raise QueueTransitionConflict("terminal job does not match expectation")
+                if (
+                    expected_job_error is not None
+                    and terminal_job["error"] != expected_job_error
+                ):
+                    raise QueueTransitionConflict("terminal job error does not match expectation")
+                if (
+                    expected_exit_code is not None
+                    and terminal_job["exit_code"] != expected_exit_code
+                ):
+                    raise QueueTransitionConflict(
+                        "terminal job exit code does not match expectation"
+                    )
+
+                if workflow_row["status"] in {"queued", "running"}:
+                    failure_error = f"{terminal_stage} stage failed"
+                    if terminal_job["error"]:
+                        failure_error += f": {terminal_job['error']}"
+                    cursor = connection.execute(
+                        """
+                        UPDATE workflows
+                        SET status = 'failed',
+                            finished_at = COALESCE(finished_at, ?),
+                            error = COALESCE(error, ?)
+                        WHERE id = ? AND status = ? AND current_stage = ?
+                        """,
+                        (
+                            terminal_job["finished_at"],
+                            failure_error,
+                            workflow_id,
+                            workflow_row["status"],
+                            terminal_stage,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise QueueTransitionConflict(
+                            "workflow changed before reconciliation"
+                        )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        workflow = self.get_workflow(workflow_id)
+        job = self.get(terminal_job["id"])
+        assert workflow is not None and job is not None
+        return workflow, job
 
     def get_workflow_for_chat(self, workflow_id: str, chat_id: str | int) -> Workflow | None:
         with self._connection() as connection:
@@ -558,7 +765,7 @@ class JobQueue:
             rows = connection.execute(
                 """
                 SELECT * FROM notifications
-                WHERE status = 'pending'
+                WHERE status = 'pending' AND dead_lettered_at IS NULL
                 ORDER BY created_at, id
                 LIMIT ?
                 """,
@@ -572,7 +779,7 @@ class JobQueue:
                 """
                 UPDATE notifications
                 SET status = 'sent', sent_at = ?, last_error = NULL
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND status = 'pending' AND dead_lettered_at IS NULL
                 """,
                 (_now(), notification_id),
             )
@@ -584,11 +791,87 @@ class JobQueue:
                 """
                 UPDATE notifications
                 SET attempts = attempts + 1, last_error = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND status = 'pending' AND dead_lettered_at IS NULL
                 """,
                 (last_error, notification_id),
             )
             return cursor.rowcount == 1
+
+    def dead_letter_notification(
+        self,
+        notification_id: int,
+        *,
+        last_error: str | None = None,
+        increment_attempt: bool = True,
+        expected_job_id: str | None = None,
+        expected_event_type: str | None = None,
+        expected_last_error: str | None = None,
+    ) -> Notification:
+        """Durably stop a permanently undeliverable pending notification.
+
+        Existing attempts, timestamps, and diagnostic text are retained unless
+        the caller explicitly records the current failed delivery attempt. The
+        expected fields support guarded operator repair of a known legacy row.
+        """
+
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM notifications WHERE id = ?", (notification_id,)
+                ).fetchone()
+                if row is None:
+                    raise QueueTransitionConflict("notification does not exist")
+                if expected_job_id is not None and row["job_id"] != expected_job_id:
+                    raise QueueTransitionConflict("notification job does not match expectation")
+                if (
+                    expected_event_type is not None
+                    and row["event_type"] != expected_event_type
+                ):
+                    raise QueueTransitionConflict(
+                        "notification event does not match expectation"
+                    )
+                if (
+                    expected_last_error is not None
+                    and row["last_error"] != expected_last_error
+                ):
+                    raise QueueTransitionConflict(
+                        "notification diagnostic does not match expectation"
+                    )
+                if row["status"] != "pending":
+                    raise QueueTransitionConflict(
+                        f"notification is not pending: {row['status']}"
+                    )
+                if row["dead_lettered_at"] is None:
+                    cursor = connection.execute(
+                        """
+                        UPDATE notifications
+                        SET dead_lettered_at = ?,
+                            attempts = attempts + ?,
+                            last_error = CASE WHEN ? IS NULL THEN last_error ELSE ? END
+                        WHERE id = ? AND status = 'pending'
+                          AND dead_lettered_at IS NULL
+                        """,
+                        (
+                            _now(),
+                            1 if increment_attempt else 0,
+                            last_error,
+                            last_error,
+                            notification_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise QueueTransitionConflict(
+                            "notification changed before dead-letter transition"
+                        )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        notification = self.get_notification(notification_id)
+        assert notification is not None
+        return notification
 
     def counts(self) -> dict[str, int]:
         counts = {"queued": 0, "running": 0, "succeeded": 0, "failed": 0}

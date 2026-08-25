@@ -1,6 +1,12 @@
-# E500-3th-aicode
+# Telegram-ai-code
 
-E500-3th-aicode 是一個在 Ubuntu / E500 工作站上運行的 **多 Agent AI 協作編程實驗專案**。
+Telegram-ai-code 是一個在 Ubuntu / E500 工作站上運行的 **Telegram 控制平面與多 Agent AI 協作編程專案**。
+
+GitHub：<https://github.com/b827262-cell/Telegram-ai-code>
+
+預設分支：`main`
+
+本專案把 Telegram 當成任務入口，將 job 排入持久化 queue，再由單一 worker 安全地執行 Codex、AGY 與 Claude。程式修改、測試、結果摘要與 Git safety 都保留可追蹤的生命週期。
 
 目前以 Telegram 作為互動入口，透過 Meeting Room API 將任務路由至 GPT / Codex、Hermes、Gemini，讓不同 Agent 分工進行程式實作、Linux / Runtime 審查與 API / Logic 審查，再由測試與 Live E2E 驗收確認結果。
 
@@ -41,6 +47,90 @@ E500-3th-aicode 是一個在 Ubuntu / E500 工作站上運行的 **多 Agent AI 
 | Gemini | API / Logic Reviewer | OpenAPI、payload schema、edge cases、反證、regression review |
 
 詳細流程請見：[AI_MULTI_AGENT_PROGRAMMING.md](AI_MULTI_AGENT_PROGRAMMING.md)
+
+## Telegram 指令
+
+| 指令 | 用途 |
+|---|---|
+| `/ping` | Bot / worker 健康檢查 |
+| `/run <task>` | 建立單一 Codex job |
+| `/run-read <task>` | 以 read-only sandbox 執行 Codex |
+| `/run-full <task>` | 以完整權限模式執行；只允許 allowlist chat 使用 |
+| `/gpt <task>` | Codex → AGY → Claude → GitHub redacted report |
+| `/agy <task>` | 建立 AGY review job |
+| `/claude <task>` | 建立 Claude final job |
+| `/status` | 查詢 queue 與 running job |
+| `/result <job_id>` | 查詢單一 job 結果 |
+| `/workflow <flow_id>` | 查詢完整 loop 流程 |
+
+### GPT loop
+
+`/gpt` 會建立一個可追蹤的 workflow，依序執行：
+
+```text
+GPT / Codex implementation
+        ↓
+AGY review
+        ↓
+Claude finalization
+        ↓
+redacted GitHub Markdown report
+```
+
+每一階段都會寫入 SQLite job 狀態，並透過 Telegram notification outbox 自動回報。若已有 Codex exec 執行中，新的 `/gpt` 會先被擋下並回報目前 running job，避免兩個 Codex 任務同時修改 workspace。
+
+## 快速開始
+
+建立 Python 環境並安裝 bridge：
+
+```bash
+cd gpt-codex-bridge
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+複製設定範例並填入私密環境：
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+至少需要設定：
+
+```env
+TELEGRAM_BOT_TOKEN=<from-secret-store>
+TELEGRAM_ALLOWED_CHAT_ID=<numeric-chat-id>
+CODEX_ALLOWED_WORKSPACES=/absolute/path/to/allowed/workspace
+CODEX_DEFAULT_WORKSPACE=/absolute/path/to/default/workspace
+```
+
+實際部署時，請使用 systemd `EnvironmentFile` 或其他 secret store；不要把真實 token 寫入 Git。
+
+分別啟動 worker 與 Telegram adapter：
+
+```bash
+cd gpt-codex-bridge
+scripts/run-worker.sh
+scripts/run-telegram.sh
+```
+
+## 測試與驗收
+
+```bash
+cd gpt-codex-bridge
+pytest -q
+```
+
+執行中的服務應維持單一 Telegram polling process：
+
+```bash
+pgrep -af 'python3 -m adapters.telegram'
+systemctl --user status gpt-codex-telegram.service --no-pager -l
+```
+
+健康檢查只能確認服務可達；完整驗收仍應從 Telegram 實際執行 `/ping`、`/run` 或 `/gpt`，再用 `/status`、`/result`、`/workflow` 查詢結果。
 
 ## 已完成的 Live E2E 驗收
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=GPT Codex Bridge native HTTP API
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/project/e500-codex-smoke/gpt-codex-bridge
+EnvironmentFile=%h/.config/gpt-codex-bridge/api.env
+ExecStart=%h/project/e500-codex-smoke/gpt-codex-bridge/scripts/run-api.sh
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

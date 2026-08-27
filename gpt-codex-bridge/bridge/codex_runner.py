@@ -19,6 +19,9 @@ class ReportValidationError(ValueError):
     """Raised when Codex output does not match the runner report contract."""
 
 
+MAX_STDOUT_REPORT_BYTES = 1_000_000
+
+
 @dataclass(frozen=True)
 class RunOutcome:
     report_path: Path
@@ -28,7 +31,11 @@ class RunOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return self.exit_code == 0 and self.report.get("status") in {"success", "partial"}
+        if self.exit_code != 0 or self.report.get("status") not in {"success", "partial"}:
+            return False
+        # An agent can exit 0 and self-report "partial" while flagging that a
+        # human must look at it; that must not be reported as succeeded.
+        return not bool(self.report.get("needs_attention"))
 
 
 def validate_report(report: Any) -> dict[str, Any]:
@@ -139,6 +146,35 @@ class CodexRunner:
     def _report_path(self, job: Job) -> Path:
         return self.settings.report_dir / f"{job.id}.json"
 
+    def _parse_report_payload(self, payload: Any, job: Job) -> dict[str, Any]:
+        return self._report_for_job(
+            _redact(payload, self.settings.secret_values, self.settings.redact_text),
+            job,
+        )
+
+    def _read_report(self, path: Path, job: Job) -> dict[str, Any]:
+        return self._parse_report_payload(
+            json.loads(path.read_text(encoding="utf-8")),
+            job,
+        )
+
+    def _parse_stdout_report(self, stdout: bytes, job: Job) -> dict[str, Any]:
+        """Parse only a complete JSON stdout message as a compatibility path.
+
+        ``codex exec`` documents stdout as the final agent message.  Some CLI
+        versions/configurations have emitted that message without creating
+        the ``--output-last-message`` artifact.  Do not extract JSON from
+        prose, JSONL, or markdown: those are not structured-report success.
+        """
+
+        if len(stdout) > MAX_STDOUT_REPORT_BYTES:
+            raise ReportValidationError("Codex stdout report is too large")
+        try:
+            payload = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReportValidationError("Codex stdout is not one JSON report") from exc
+        return self._parse_report_payload(payload, job)
+
     def _write_report(self, path: Path, report: dict[str, Any]) -> None:
         safe_report = _redact(
             report,
@@ -194,24 +230,25 @@ class CodexRunner:
             env=child_env,
             shell=False,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
         timed_out = False
+        stdout = b""
         try:
-            process.communicate(timeout=self.settings.codex_timeout_seconds)
+            stdout, _stderr = process.communicate(timeout=self.settings.codex_timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
             self._kill_process_group(process)
             try:
-                process.communicate(timeout=5)
+                stdout, _stderr = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
                     process.kill()
                 except OSError:
                     pass
-                process.communicate()
+                stdout, _stderr = process.communicate()
 
         exit_code = int(process.returncode if process.returncode is not None else -1)
         if timed_out:
@@ -228,21 +265,20 @@ class CodexRunner:
             return RunOutcome(report_path, report, exit_code, timed_out=True)
 
         try:
-            raw_report = json.loads(report_path.read_text(encoding="utf-8"))
-            report = self._report_for_job(
-                _redact(raw_report, self.settings.secret_values, self.settings.redact_text),
-                job,
-            )
-        except (OSError, json.JSONDecodeError, ReportValidationError):
-            report = {
-                "status": "failed",
-                "summary": "Codex did not produce a valid structured report",
-                "changed_files": [],
-                "tests": [],
-                "git_status": "",
-                "needs_attention": True,
-                "sandbox_mode": validate_sandbox_mode(job.sandbox_mode),
-            }
+            report = self._read_report(report_path, job)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ReportValidationError):
+            try:
+                report = self._parse_stdout_report(stdout, job)
+            except ReportValidationError:
+                report = {
+                    "status": "failed",
+                    "summary": "Codex did not produce a valid structured report",
+                    "changed_files": [],
+                    "tests": [],
+                    "git_status": "",
+                    "needs_attention": True,
+                    "sandbox_mode": validate_sandbox_mode(job.sandbox_mode),
+                }
         if exit_code != 0:
             report = {
                 "status": "failed",

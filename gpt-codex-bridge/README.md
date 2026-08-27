@@ -187,6 +187,12 @@ codex exec \
   "$PROMPT"
 ```
 
+The `--output-last-message` file is authoritative when available. If a
+compatible CLI cannot create that artifact because of an enclosing filesystem
+policy, the bridge accepts stdout only when it is one complete JSON object
+passing the same strict report and sandbox validation. Natural-language stdout
+is never a successful report.
+
 `report.json` must contain only:
 
 ```json

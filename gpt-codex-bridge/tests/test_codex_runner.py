@@ -8,14 +8,16 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bridge.codex_runner import CodexRunner
+from bridge.codex_runner import CodexRunner, ReportValidationError, validate_report
 from bridge.config import Settings
 from bridge.models import Job
 from bridge.sandbox import DEFAULT_SANDBOX_MODE
 
 
-def report(summary: str = "ok", *, status: str = "success") -> dict:
-    return {
+def report(
+    summary: str = "ok", *, status: str = "success", sandbox_mode: str | None = None
+) -> dict:
+    payload = {
         "status": status,
         "summary": summary,
         "changed_files": ["worker.py"],
@@ -23,6 +25,9 @@ def report(summary: str = "ok", *, status: str = "success") -> dict:
         "git_status": " M worker.py",
         "needs_attention": False,
     }
+    if sandbox_mode is not None:
+        payload["sandbox_mode"] = sandbox_mode
+    return payload
 
 
 def settings_for(directory: str, *, token: str = "telegram-secret") -> Settings:
@@ -51,9 +56,17 @@ def job_for(settings: Settings, *, sandbox_mode: str = DEFAULT_SANDBOX_MODE) -> 
 
 
 class FakeProcess:
-    def __init__(self, argv: list[str], report_payload: dict, *, timeout: bool = False) -> None:
+    def __init__(
+        self,
+        argv: list[str],
+        report_payload: dict | None = None,
+        *,
+        stdout: bytes = b"",
+        timeout: bool = False,
+    ) -> None:
         self.argv = argv
         self.report_payload = report_payload
+        self.stdout = stdout
         self.timeout = timeout
         self.returncode: int | None = None
         self.pid = os.getpid()
@@ -62,10 +75,11 @@ class FakeProcess:
     def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
         if self.timeout and not self.killed:
             raise subprocess.TimeoutExpired(self.argv, timeout)
-        report_path = Path(self.argv[self.argv.index("-o") + 1])
-        report_path.write_text(json.dumps(self.report_payload), encoding="utf-8")
+        if self.report_payload is not None:
+            report_path = Path(self.argv[self.argv.index("-o") + 1])
+            report_path.write_text(json.dumps(self.report_payload), encoding="utf-8")
         self.returncode = 0 if not self.killed else -15
-        return b"", b""
+        return self.stdout, b""
 
     def kill(self) -> None:
         self.killed = True
@@ -121,6 +135,120 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertNotIn("telegram-secret", content)
             self.assertEqual(json.loads(content)["sandbox_mode"], "workspace-write")
 
+    def test_current_codex_report_file_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = settings_for(directory)
+            settings.ensure_runtime_dirs()
+
+            def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                return FakeProcess(argv, report(sandbox_mode="workspace-write"))
+
+            outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+            self.assertTrue(outcome.succeeded)
+            self.assertEqual(outcome.report["status"], "success")
+            self.assertEqual(
+                json.loads(outcome.report_path.read_text(encoding="utf-8")),
+                outcome.report,
+            )
+
+    def test_missing_output_file_uses_only_strict_json_stdout_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = settings_for(directory)
+            settings.ensure_runtime_dirs()
+            payload = report(sandbox_mode="workspace-write")
+
+            def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                return FakeProcess(argv, stdout=json.dumps(payload).encode("utf-8"))
+
+            outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+            self.assertTrue(outcome.succeeded)
+            self.assertEqual(outcome.report, payload)
+            self.assertEqual(
+                json.loads(outcome.report_path.read_text(encoding="utf-8")), payload
+            )
+
+    def test_exit_zero_with_missing_or_natural_language_report_fails_closed(self) -> None:
+        for stdout in (b"", b"Codex completed the task successfully."):
+            with self.subTest(stdout=stdout), tempfile.TemporaryDirectory() as directory:
+                settings = settings_for(directory)
+                settings.ensure_runtime_dirs()
+
+                def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                    return FakeProcess(argv, stdout=stdout)
+
+                outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+                self.assertEqual(outcome.exit_code, 0)
+                self.assertFalse(outcome.succeeded)
+                self.assertEqual(
+                    outcome.report["summary"],
+                    "Codex did not produce a valid structured report",
+                )
+
+    def test_invalid_report_file_and_invalid_stdout_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = settings_for(directory)
+            settings.ensure_runtime_dirs()
+
+            def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                report_path = Path(argv[argv.index("-o") + 1])
+                report_path.write_text('{"status":"success"}', encoding="utf-8")
+                return FakeProcess(argv, stdout=b"{\"status\":\"success\"}")
+
+            outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+            self.assertFalse(outcome.succeeded)
+            self.assertEqual(
+                outcome.report["summary"],
+                "Codex did not produce a valid structured report",
+            )
+
+    def test_schema_contract_validation_rejects_invalid_shapes(self) -> None:
+        valid = report(sandbox_mode="workspace-write")
+        self.assertEqual(validate_report(valid), valid)
+        for invalid in (
+            {**valid, "extra": True},
+            {key: value for key, value in valid.items() if key != "tests"},
+            {**valid, "tests": [{"command": "pytest", "result": "pass"}]},
+            {**valid, "sandbox_mode": "unrestricted"},
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ReportValidationError):
+                    validate_report(invalid)
+
+    def test_report_schema_file_matches_strict_validator_contract(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "schemas" / "codex_report.schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(schema["type"], "object")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["required"]), set(report(sandbox_mode="read-only")))
+        self.assertEqual(set(schema["properties"]), set(report(sandbox_mode="read-only")))
+        self.assertFalse(schema["properties"]["tests"]["items"]["additionalProperties"])
+
+    def test_report_mode_is_normalized_only_when_absent_and_mismatch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = settings_for(directory)
+            settings.ensure_runtime_dirs()
+
+            def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                return FakeProcess(argv, report())
+
+            outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+            self.assertTrue(outcome.succeeded)
+            self.assertEqual(outcome.report["sandbox_mode"], "workspace-write")
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = settings_for(directory)
+            settings.ensure_runtime_dirs()
+
+            def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                return FakeProcess(
+                    argv,
+                    report(sandbox_mode="danger-full-access"),
+                )
+
+            outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+            self.assertFalse(outcome.succeeded)
+            self.assertEqual(outcome.report["sandbox_mode"], "workspace-write")
+
     def test_supported_modes_are_selected_per_job(self) -> None:
         for mode in ("read-only", "workspace-write", "danger-full-access"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
@@ -150,6 +278,24 @@ class CodexRunnerTests(unittest.TestCase):
             outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
             self.assertFalse(outcome.succeeded)
             self.assertEqual(outcome.report["sandbox_mode"], "workspace-write")
+
+    def test_needs_attention_overrides_status_success_or_partial(self) -> None:
+        for status in ("success", "partial"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                settings = settings_for(directory)
+                settings.ensure_runtime_dirs()
+
+                def factory(argv: list[str], **kwargs: object) -> FakeProcess:
+                    payload = report(status=status)
+                    payload["needs_attention"] = True
+                    return FakeProcess(argv, payload)
+
+                outcome = CodexRunner(settings, popen_factory=factory).run(job_for(settings))
+                self.assertEqual(outcome.exit_code, 0)
+                self.assertFalse(
+                    outcome.succeeded,
+                    "needs_attention=True must never be reported as succeeded",
+                )
 
     def test_timeout_terminates_process_and_writes_failed_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

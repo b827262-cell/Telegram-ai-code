@@ -58,5 +58,5 @@
   "durable_workspace_routing_014_review_job": "job-f5cca594af824237",
   "durable_workspace_routing_014_specimen_flow": "flow-163c7d3c14694430",
   "durable_workspace_routing_014_publication_containment": "pass",
-  "sandbox_enforcement_parity_015": "not_started"
+  "sandbox_enforcement_parity_015": "closed_pass_with_nonblocking_findings"
 }

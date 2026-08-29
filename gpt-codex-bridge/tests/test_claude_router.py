@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from adapters.telegram import TelegramAdapter
 from bridge.claude_runner import CLAUDE_EFFORT, CLAUDE_MODEL, ClaudeRunner
@@ -61,6 +64,21 @@ def update(text: str) -> dict:
 
 
 class ClaudeRouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Plan building must not depend on the host having bwrap installed;
+        # enforcement behavior itself is proven in test_sandbox_enforcement.py.
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(
+            patch("bridge.sandbox._which", return_value="/usr/bin/bwrap")
+        )
+        stack.enter_context(
+            patch(
+                "bridge.sandbox._execute_probe",
+                return_value=SimpleNamespace(returncode=0),
+            )
+        )
+
     def test_claude_constants(self) -> None:
         self.assertEqual(CLAUDE_MODEL, "claude-opus-5")
         self.assertEqual(CLAUDE_EFFORT, "medium")
@@ -105,8 +123,12 @@ class ClaudeRouterTests(unittest.TestCase):
 
             outcome = ClaudeRunner(settings, popen_factory=factory).run(job)
 
+            argv = captured["argv"]
+            self.assertEqual(argv[0], settings.sandbox_bwrap_bin)
+            self.assertIn("--", argv)
+            provider_argv = argv[argv.index("--") + 1 :]
             self.assertEqual(
-                captured["argv"],
+                provider_argv,
                 [
                     "claude",
                     "-p",
@@ -119,10 +141,11 @@ class ClaudeRouterTests(unittest.TestCase):
             )
             self.assertEqual(captured["kwargs"]["cwd"], str(settings.default_workspace))
             self.assertFalse(captured["kwargs"]["shell"])
-            self.assertNotIn("--dangerously-skip-permissions", captured["argv"])
-            self.assertNotIn("--channels", captured["argv"])
+            self.assertNotIn("--dangerously-skip-permissions", argv)
+            self.assertNotIn("--channels", argv)
             self.assertTrue(outcome.succeeded)
             self.assertEqual(outcome.report["summary"], "CLAUDE_OK")
+            self.assertEqual(outcome.report["sandbox_mode"], "workspace-write")
 
     def test_claude_runner_command_uses_explicit_model_and_effort_if_provided(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -139,7 +162,7 @@ class ClaudeRouterTests(unittest.TestCase):
             runner = ClaudeRunner(settings)
             argv = runner.command_for(job)
             self.assertEqual(
-                argv,
+                argv[argv.index("--") + 1 :],
                 [
                     "claude",
                     "-p",

@@ -9,10 +9,14 @@ import signal
 import subprocess
 from typing import Any, Callable
 
-from .codex_runner import RunOutcome, validate_report
+from .codex_runner import FAILURE_SANDBOX_ENFORCEMENT, RunOutcome, validate_report
 from .config import Settings
 from .models import Job
-from .sandbox import validate_sandbox_mode
+from .sandbox import (
+    SandboxEnforcementError,
+    sandbox_launch_plan,
+    validate_sandbox_mode,
+)
 
 
 CLAUDE_MODEL = "claude-opus-5"
@@ -36,18 +40,27 @@ class ClaudeRunner:
     def command_for(self, job: Job) -> list[str]:
         if job.provider != "claude":
             raise ValueError("ClaudeRunner can only run Claude jobs")
-        self.settings.validate_workspace(job.workspace)
+        workspace = self.settings.validate_workspace(job.workspace)
         model = job.model or CLAUDE_MODEL
         effort = job.effort or CLAUDE_EFFORT
-        return [
-            self.settings.claude_bin,
-            "-p",
-            job.prompt,
-            "--model",
-            model,
-            "--effort",
-            effort,
-        ]
+        plan = sandbox_launch_plan(
+            "claude",
+            job.sandbox_mode,
+            workspace,
+            env=self.settings.claude_environment(),
+            bwrap_bin=self.settings.sandbox_bwrap_bin,
+        )
+        return plan.enforce_argv(
+            [
+                self.settings.claude_bin,
+                "-p",
+                job.prompt,
+                "--model",
+                model,
+                "--effort",
+                effort,
+            ]
+        )
 
     @staticmethod
     def _kill_group(process: Any) -> None:
@@ -121,7 +134,23 @@ class ClaudeRunner:
         report_path = self._report_path(job)
         report_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         workspace = self.settings.validate_workspace(job.workspace)
-        command = self.command_for(job)
+        try:
+            command = self.command_for(job)
+        except SandboxEnforcementError as exc:
+            report = self._report(
+                job,
+                status="failed",
+                summary=str(exc),
+                needs_attention=True,
+            )
+            self._write_report(report_path, report)
+            return RunOutcome(
+                report_path,
+                report,
+                0,
+                timed_out=False,
+                explicit_failure=FAILURE_SANDBOX_ENFORCEMENT,
+            )
         process = self._popen(
             command,
             cwd=str(workspace),

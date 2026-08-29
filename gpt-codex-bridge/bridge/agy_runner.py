@@ -10,10 +10,19 @@ import signal
 import subprocess
 from typing import Any, Callable
 
-from .codex_runner import FAILURE_INVALID_REPORT, RunOutcome, validate_report
+from .codex_runner import (
+    FAILURE_INVALID_REPORT,
+    FAILURE_SANDBOX_ENFORCEMENT,
+    RunOutcome,
+    validate_report,
+)
 from .config import Settings
 from .models import Job
-from .sandbox import validate_sandbox_mode
+from .sandbox import (
+    SandboxEnforcementError,
+    sandbox_launch_plan,
+    validate_sandbox_mode,
+)
 
 
 AGY_MODEL = "gemini-3.7-flash-high"
@@ -82,16 +91,25 @@ class AgyRunner:
     def command_for(self, job: Job) -> list[str]:
         if job.provider != "agy":
             raise ValueError("AgyRunner can only run agy jobs")
-        self.settings.validate_workspace(job.workspace)
-        return [
-            self.settings.agy_bin,
-            "-p",
-            job.prompt,
-            "--model",
-            AGY_MODEL,
-            "--output-format",
-            "json",
-        ]
+        workspace = self.settings.validate_workspace(job.workspace)
+        plan = sandbox_launch_plan(
+            "agy",
+            job.sandbox_mode,
+            workspace,
+            env=self.settings.agy_environment(),
+            bwrap_bin=self.settings.sandbox_bwrap_bin,
+        )
+        return plan.enforce_argv(
+            [
+                self.settings.agy_bin,
+                "-p",
+                job.prompt,
+                "--model",
+                AGY_MODEL,
+                "--output-format",
+                "json",
+            ]
+        )
 
     @staticmethod
     def _kill_group(process: Any) -> None:
@@ -167,7 +185,23 @@ class AgyRunner:
         report_path = self._report_path(job)
         report_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         workspace = self.settings.validate_workspace(job.workspace)
-        command = self.command_for(job)
+        try:
+            command = self.command_for(job)
+        except SandboxEnforcementError as exc:
+            report = self._report(
+                job,
+                status="failed",
+                summary=str(exc),
+                needs_attention=True,
+            )
+            self._write_report(report_path, report)
+            return RunOutcome(
+                report_path,
+                report,
+                0,
+                timed_out=False,
+                explicit_failure=FAILURE_SANDBOX_ENFORCEMENT,
+            )
         process = self._popen(
             command,
             cwd=str(workspace),

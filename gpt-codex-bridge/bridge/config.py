@@ -93,6 +93,7 @@ class Settings:
     claude_timeout_seconds: float = 3600.0
     agy_bin: str = "agy"
     agy_timeout_seconds: float = 3600.0
+    sandbox_bwrap_bin: str = "bwrap"
     github_report_enabled: bool = False
     github_cli_bin: str = "gh"
     github_report_branch: str = "main"
@@ -211,6 +212,7 @@ class Settings:
             claude_timeout_seconds=_float_env(values, "CLAUDE_JOB_TIMEOUT_SECONDS", 3600.0),
             agy_bin=values.get("AGY_BIN", "agy"),
             agy_timeout_seconds=_float_env(values, "AGY_JOB_TIMEOUT_SECONDS", 3600.0),
+            sandbox_bwrap_bin=values.get("CODEX_SANDBOX_BWRAP_BIN", "bwrap"),
             github_report_enabled=_bool_env(values, "GITHUB_REPORT_ENABLED", False),
             github_cli_bin=values.get("GITHUB_CLI_BIN", "gh"),
             github_report_branch=values.get("GITHUB_REPORT_BRANCH", "main"),

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from adapters.telegram import TelegramAdapter
@@ -88,6 +90,21 @@ def agy_job(settings: Settings) -> Job:
 
 
 class AgyRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Plan building must not depend on the host having bwrap installed;
+        # enforcement behavior itself is proven in test_sandbox_enforcement.py.
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(
+            patch("bridge.sandbox._which", return_value="/usr/bin/bwrap")
+        )
+        stack.enter_context(
+            patch(
+                "bridge.sandbox._execute_probe",
+                return_value=SimpleNamespace(returncode=0),
+            )
+        )
+
     def test_exact_argv_shell_false_and_api_keys_are_removed_from_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ,
@@ -100,6 +117,33 @@ class AgyRunnerTests(unittest.TestCase):
         ):
             settings = make_settings(directory)
             settings.ensure_runtime_dirs()
+            home = Path(directory) / "home"
+            (home / ".gemini").mkdir(parents=True)
+            (home / ".gemini" / "oauth_creds.json").write_text("credential")
+            workspace = settings.default_workspace
+            expected_prefix = [
+                "bwrap",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                "--bind",
+                str(home / ".gemini"),
+                str(home / ".gemini"),
+                "--ro-bind",
+                str(home / ".gemini" / "oauth_creds.json"),
+                str(home / ".gemini" / "oauth_creds.json"),
+                "--bind",
+                str(workspace),
+                str(workspace),
+                "--die-with-parent",
+                "--",
+            ]
             captured: dict[str, object] = {}
 
             def factory(argv: list[str], **kwargs: object) -> FakeProcess:
@@ -107,11 +151,15 @@ class AgyRunnerTests(unittest.TestCase):
                 captured["kwargs"] = kwargs
                 return FakeProcess(json.dumps({"response": "AGY_OAUTH_OK"}))
 
-            outcome = AgyRunner(settings, popen_factory=factory).run(agy_job(settings))
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                outcome = AgyRunner(settings, popen_factory=factory).run(
+                    agy_job(settings)
+                )
 
             self.assertEqual(
                 captured["argv"],
                 [
+                    *expected_prefix,
                     "agy",
                     "-p",
                     "Reply exactly AGY_OAUTH_OK",

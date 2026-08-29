@@ -78,6 +78,7 @@ FAILURE_EXIT_NONZERO = "exit_nonzero"
 FAILURE_INVALID_REPORT = "invalid_report"
 FAILURE_NEEDS_ATTENTION = "needs_attention"
 FAILURE_AGENT_REPORTED = "agent_reported_failure"
+FAILURE_SANDBOX_ENFORCEMENT = "sandbox_enforcement"
 
 FAILURE_CLASSES = frozenset(
     {
@@ -87,6 +88,7 @@ FAILURE_CLASSES = frozenset(
         FAILURE_INVALID_REPORT,
         FAILURE_NEEDS_ATTENTION,
         FAILURE_AGENT_REPORTED,
+        FAILURE_SANDBOX_ENFORCEMENT,
     }
 )
 
@@ -164,6 +166,10 @@ def describe_failure(provider: str, outcome: RunOutcome) -> str:
         return f"{label} CLI failed (exit code {outcome.exit_code})"
     if reason == FAILURE_INVALID_REPORT:
         return f"{label} did not produce a valid structured report"
+    if reason == FAILURE_SANDBOX_ENFORCEMENT:
+        message = f"{label} failed before launch"
+        detail = _failure_detail(outcome.report)
+        return f"{message}: {detail}" if detail else message
     if reason == FAILURE_NEEDS_ATTENTION:
         message = f"{label} completed but flagged needs_attention"
         detail = _failure_detail(outcome.report)

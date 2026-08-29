@@ -43,5 +43,13 @@
   "needs_attention_semantics_013_specimen_flow": "flow-d47d7f6bb3614992",
   "needs_attention_semantics_013_review_job": "job-5673268a0ace4457",
   "bridge_workspace_allowlist": "ai-meeting-room-only",
-  "durable_workspace_routing_014": "not_started"
+  "durable_workspace_routing_014": "not_started",
+  "bridge_attribution_anchor_sha": "3a9934693d4c3c78bdf6f384f054a2aedab4f0bf",
+  "bridge_dependency_anchor_sha": "17cf2c4b2aaf76a30748d93560858a0a2c741d8e",
+  "bridge_green_baseline_sha": "17cf2c4b2aaf76a30748d93560858a0a2c741d8e",
+  "bridge_self_contained_baseline": "pass",
+  "bridge_self_contained_baseline_isolated_unittest": "116 passed 0 errors",
+  "bridge_self_contained_baseline_isolated_pytest": "116 passed 26 subtests 0 collection errors",
+  "bridge_self_contained_baseline_import_sweep": "25/25 modules ok",
+  "bridge_pushed": false
 }

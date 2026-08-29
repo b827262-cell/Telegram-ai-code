@@ -1,0 +1,35 @@
+TASK: E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015 COMMIT READINESS
+ROLE: Qoder CLI implementer / GLM-5.3-Flash xhigh
+WORKSPACE: /home/b827262/project/e500-codex-smoke
+BRIDGE: /home/b827262/project/e500-codex-smoke/gpt-codex-bridge
+BASELINE HEAD: b1375230a0027aa00b2842a1f6fb669846a67d75
+
+INPUTS:
+- reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REVIEW.md
+- reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER-REMEDIATION.md
+- reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REREVIEW.md
+
+GOAL:
+Prepare the current uncommitted 015 implementation as an exact, self-contained commit candidate, but DO NOT commit or push.
+Preserve all unrelated dirty/untracked files. Do not alter 013/014 behavior.
+REQUIRED:
+1. Derive the exact 015 commit scope from HEAD diff plus the three reports; exclude runtime scratch/specimen/cache artifacts unless they are deliberate test fixtures.
+2. Create a manifest with exact paths and classify each as code/test/doc/evidence.
+3. Verify no unrelated pre-015 work is being swept in.
+4. Run git diff --check.
+5. Run focused 015 tests, full unittest discover with correct top-level, and full pytest; record exact counts.
+6. Build a fresh isolated candidate from git archive HEAD plus ONLY the proposed 015 files/bytes, with no dependency on the dirty working tree; run import/collection/full tests there. Do not use git commit-tree or alter Git history.
+7. Verify Codex argv no-regression, 013 failure/needs_attention semantics, and 014 workspace/publication ceilings.
+8. Update reports/sites-version-state.json for 015 only if that file already tracks these task states; otherwise do not invent schema.
+9. Identify any untracked runtime acceptance files that should be excluded from commit.
+10. Write a final commit-readiness report and recommended commit subject.
+
+HARD SAFETY:
+NO git add/stage, commit, push, amend, reset, rebase, clean, stash, force, checkout, restore, or history rewrite.
+NO Sites save/deploy/publish. NO external publication. NO credential output.
+Do not modify source unless a new blocker is proven; if a blocker exists, fix minimally and re-run gates.
+OUTPUT:
+Write /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER-COMMIT-READINESS.md
+Include exact proposed commit path list, excluded artifacts, isolated-gate construction, test counts, remaining finding MEDIUM-2 disposition, Git state, and READY_TO_COMMIT yes/no.
+End marker exactly: QODER_GLM53_FLASH_XHIGH_SANDBOX_PARITY_015_COMMIT_READINESS_READY
+Final response: PASS / PASS_WITH_FINDINGS / FAIL. Do not commit.

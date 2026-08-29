@@ -1,0 +1,34 @@
+TASK: E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015 REREVIEW
+ROLE: Independent final reviewer — Claude Opus 5 / medium
+MODE: READ ONLY. Do not modify tracked files, services, Git state, or external systems.
+WORKSPACE: /home/b827262/project/e500-codex-smoke/gpt-codex-bridge
+BASELINE HEAD: b1375230a0027aa00b2842a1f6fb669846a67d75
+
+INPUTS:
+- /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REVIEW.md
+- /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER-REMEDIATION.md
+- current uncommitted 015 working tree
+
+Qoder remediation claims:
+- MEDIUM-1 fixed: real-bwrap tests gate on production functional probe, with tests for present-but-unusable and usable cases.
+- MEDIUM-3 fixed: docs explicitly scope filesystem/mount-namespace only.
+- LOW-2 reverted.
+- MEDIUM-2 intentionally remains open: no --clearenv allowlist without complete auth/runtime evidence.
+- host gates: focused 28/28; unittest 206/206; pytest 229 + 74 subtests; git diff --check clean.
+REVIEW REQUIREMENTS:
+1. Verify the actual remediation diff, not just Qoder's report.
+2. Re-evaluate prior MEDIUM-1 and confirm functional gate uses the same authoritative production probe and behaves correctly in nested/constrained environments.
+3. Re-evaluate MEDIUM-3 claim boundary. No network/PID/IPC/seccomp/full-container overclaim.
+4. Evaluate whether leaving MEDIUM-2 open is acceptable before commit or is now a blocking issue. Do not require speculative allowlisting that could break auth.
+5. Re-check Claude/AGY fail-closed machine enforcement, Codex no-regression, 013 failure/needs_attention semantics, and 014 workspace/publication ceilings.
+6. Re-run safe focused/full tests as useful. If nested bwrap cannot run inside this read-only reviewer sandbox, distinguish environment artifact from host defect exactly as in the prior review.
+7. Confirm no commit/push/Sites/external publication occurred.
+8. Identify any NEW blocking defect introduced by remediation.
+
+OUTPUT:
+Return a complete durable review. Also write a copy, if allowed, to:
+/home/b827262/.claude/projects/-home-b827262-project-e500-codex-smoke/handoff/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REREVIEW.md
+Allowed FINAL_VERDICT: PASS, PASS_WITH_NONBLOCKING_FINDINGS, PASS_WITH_FIX_REQUIRED, FAIL.
+State whether 015 is READY_TO_COMMIT.
+End marker exactly: CLAUDE_OPUS5_MEDIUM_SANDBOX_PARITY_015_REREVIEW_COMPLETE
+Do not commit or push.

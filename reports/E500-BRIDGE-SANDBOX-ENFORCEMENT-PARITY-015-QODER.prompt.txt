@@ -1,0 +1,56 @@
+TASK: E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015
+ROLE: Qoder CLI implementer / GLM-5.3-Flash xhigh
+WORKSPACE: /home/b827262/project/e500-codex-smoke
+BRIDGE: /home/b827262/project/e500-codex-smoke/gpt-codex-bridge
+BASELINE HEAD: b1375230a0027aa00b2842a1f6fb669846a67d75
+
+GOAL:
+Close the 015 gap discovered in 014: Codex passes a real runtime sandbox, while ClaudeRunner and AGYRunner currently only validate/record sandbox_mode without a machine-enforced execution boundary. Implement the safest evidence-backed parity possible without weakening existing boundaries.
+
+MANDATORY INVESTIGATION FIRST:
+1. Verify HEAD is exactly the baseline and preserve unrelated dirty/untracked files.
+2. Inspect claude_runner.py, agy_runner.py, codex_runner.py, sandbox helpers, worker/queue interfaces and tests.
+3. Inspect the actual installed `claude --help`, `claude --version`, `agy --help`, and `agy --version` on E500. Do not invent flags or semantics.
+4. Determine for each provider which requested modes (read-only, workspace-write, danger-full-access) can be enforced by provider CLI and/or a reliable local OS sandbox available on this host.
+5. Explicitly distinguish dispatch policy, CLI permission policy, and filesystem/OS isolation. Prefer fail-closed over falsely claiming enforcement.
+IMPLEMENTATION REQUIREMENTS:
+A. Centralize provider sandbox enforcement/mapping in a narrow shared module/helper; no duplicated ad-hoc mappings.
+B. Claude and AGY runners must either enforce the requested sandbox mode through a verifiable runtime mechanism, or fail closed before process launch for modes they cannot genuinely enforce. No silent downgrade/upgrade.
+C. Preserve Codex behavior exactly unless a shared abstraction requires a tested no-op refactor.
+D. Report sandbox_mode must reflect the authoritative enforced mode, not model self-description.
+E. Add safe diagnostics for unsupported/unavailable enforcement without secret content.
+F. Keep 014 workspace alias/policy semantics unchanged; route ceilings are not runtime enforcement.
+G. Socket-test noise from 014: if loopback-bind tests fail specifically because enforced sandbox denies socket(), skip only on that precise sandbox-denial condition. Do not blanket-skip or hide real bind failures outside sandbox.
+
+TEST MATRIX:
+- Provider x mode mapping tests for codex/claude/agy.
+- read-only: attempted controlled write denied by enforcement, not prompt cooperation.
+- workspace-write: inside-workspace controlled write allowed if claimed supported; outside-workspace write denied.
+- danger-full-access: existing workspace/publication policy unchanged; no new publication privilege.
+- unsupported provider/mode combinations fail before launch with distinct safe error.
+- argv/wrapper tests prove actual runtime enforcement is present.
+- report sandbox_mode/failure classification remains correct.- valid report and needs_attention semantics stay compatible with 013.
+- socket-bind tests only skip under exact sandbox PermissionError; normal environment still executes them.
+- run focused tests, full unittest, full pytest.
+
+RUNTIME ACCEPTANCE:
+After tests, restart only necessary gpt-codex-* user services if reload is needed and verify active.
+Run bounded live acceptance through bridge workspace alias `bridge`, with noExternalWrite=true where applicable:
+1. Claude read-only cannot modify a controlled specimen by machine enforcement.
+2. AGY read-only cannot modify a controlled specimen by machine enforcement.
+3. Supported workspace-write behavior matches the claimed boundary, or unsupported modes fail closed.
+Do not run destructive tasks or external publication.
+
+HARD SAFETY:
+- NO git commit, push, amend, reset, rebase, clean, stash, force, or history rewrite.
+- NO ChatGPT Sites save/deploy/publish.
+- NO credential output.
+- Preserve unrelated dirty/untracked files.
+- If true runtime enforcement cannot be achieved safely with installed tooling, implement/report fail-closed behavior and state unsupported modes. Never fake parity.
+WRITE REPORT:
+/home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER.md
+Include baseline, exact changed files, enforcement mechanism per provider/mode, CLI evidence, tests, live acceptance, limitations, final verdict.
+End marker: QODER_GLM53_FLASH_XHIGH_SANDBOX_PARITY_015_READY
+
+FINAL RESPONSE:
+Concise summary + report path + PASS/PASS_WITH_FINDINGS/FAIL. Do not commit.

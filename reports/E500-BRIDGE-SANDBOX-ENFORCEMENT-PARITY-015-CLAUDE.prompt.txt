@@ -1,0 +1,44 @@
+TASK: E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015
+ROLE: Independent final reviewer — Claude Opus 5 / medium
+MODE: READ ONLY. Do not modify any file, service, Git state, or external system.
+WORKSPACE: /home/b827262/project/e500-codex-smoke/gpt-codex-bridge
+BASELINE HEAD: b1375230a0027aa00b2842a1f6fb669846a67d75
+
+CONTEXT:
+014 closed with durable workspace alias routing. Its only PARTIAL finding was that Codex had real runtime sandbox enforcement while Claude/AGY only recorded dispatch sandbox_mode.
+Qoder GLM-5.3-Flash xhigh implemented 015 in the current uncommitted working tree. The Qoder CLI later stopped making source changes and was terminated before it wrote its final report, so do not trust or depend on a missing Qoder verdict.
+Independent post-Qoder gates already observed: git diff --check PASS; tests.test_sandbox_enforcement 24/24 PASS; full unittest 202/202 PASS; pytest 225 passed + 74 subtests PASS. Re-run/verify what is necessary yourself.
+
+PRIMARY REVIEW QUESTION:
+Does the current 015 implementation provide truthful, fail-closed, machine-enforced sandbox semantics for Claude and AGY without weakening Codex/014/013 behavior?
+MANDATORY REVIEW MATRIX:
+1. Inspect exact diff from HEAD for bridge/sandbox.py, claude_runner.py, agy_runner.py, codex_runner.py, config.py and all 015 tests/fixture.
+2. Verify provider × sandbox-mode semantics for codex, claude, agy: read-only, workspace-write, danger-full-access.
+3. Verify Claude/AGY read-only denial is kernel/OS enforcement, not prompt cooperation or provider permission mode.
+4. Verify workspace-write permits only the selected workspace while ordinary filesystem/home remains read-only except narrowly justified provider state carve-outs.
+5. Verify unsupported/missing enforcement fails before provider process launch with a distinct safe failure classification.
+6. Verify danger-full-access does not acquire publication privilege; 014 workspace/publication ceilings remain authoritative.
+7. Verify report sandbox_mode is authoritative and 013 needs_attention/failure classification semantics do not regress.
+8. Verify Codex argv/sandbox behavior is unchanged except any proven no-op shared abstraction.
+9. Review bubblewrap construction for path escape, relative path, HOME/state carve-out, credentials mutability, symlink, executable lookup, env leakage, network/socket claims, and fail-open risks.
+10. Verify socket-test handling is precise: only exact sandbox PermissionError may be skipped; normal bind behavior must still execute.
+11. Check untracked sbx-acceptance-* files and distinguish intentional evidence from cleanup artifacts.
+12. Check no commit/push/Sites/external publication occurred.
+
+IMPORTANT CLAIM BOUNDARY:
+Do not call this full container/network isolation unless the implementation proves it. State exactly what bubblewrap enforces (filesystem/mount namespace etc.) and what it does not enforce.
+Do not accept provider CLI permission flags as equivalent to filesystem sandboxing.
+TEST/ACCEPTANCE:
+- Re-run focused tests and full tests if safe; record exact counts.
+- Inspect current worker service state and relevant post-change runtime evidence.
+- If a bounded read-only probe is needed, it must not mutate tracked files or external systems.
+- Treat any mismatch between test claims and actual enforcement as a finding.
+
+OUTPUT:
+Write the complete review to:
+/home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REVIEW.md
+Include provenance, exact reviewed paths, findings by severity, matrix verdicts, test evidence, runtime boundary, remediation required before commit, and FINAL_VERDICT.
+Allowed verdicts: PASS, PASS_WITH_NONBLOCKING_FINDINGS, PASS_WITH_FIX_REQUIRED, FAIL.
+End marker exactly:
+CLAUDE_OPUS5_MEDIUM_SANDBOX_PARITY_015_REVIEW_COMPLETE
+Do not commit or push.

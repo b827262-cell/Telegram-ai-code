@@ -1,0 +1,38 @@
+TASK: E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015 REMEDIATION
+ROLE: Qoder CLI implementer / GLM-5.3-Flash xhigh
+WORKSPACE: /home/b827262/project/e500-codex-smoke
+BRIDGE: /home/b827262/project/e500-codex-smoke/gpt-codex-bridge
+BASELINE HEAD: b1375230a0027aa00b2842a1f6fb669846a67d75
+
+INPUT REVIEW:
+reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REVIEW.md
+Current 015 working tree is uncommitted. Preserve its valid implementation and all unrelated dirty/untracked files.
+
+GOAL:
+Remediate the Opus 5 non-blocking findings without weakening 013/014/015 semantics. Do not redesign 015 unnecessarily.
+
+REQUIRED:
+1. Fix MEDIUM-1: RealBubblewrapEnforcementTests must gate on FUNCTIONAL bwrap capability, not shutil.which() binary presence. Reuse the same authoritative probe/helper used by production enforcement. Add tests proving present-but-unusable bwrap is skipped/fail-closed appropriately and usable bwrap still runs.
+2. Review MEDIUM-2 (--clearenv + explicit environment allowlist). Implement only if you can prove Claude and AGY authentication/runtime still work with the required environment. Never drop required auth/runtime variables and never weaken isolation. If not safely provable in this pass, leave code unchanged and document the residual finding.
+3. Fix MEDIUM-3 documentation: explicitly state this is filesystem/mount-namespace isolation, not network/PID/IPC/seccomp/full-container isolation.
+4. Evaluate LOW findings only if the fix is clearly scoped and behavior-preserving; do not churn code merely for cosmetics.
+VALIDATION:
+- git diff --check
+- focused 015 tests including real bubblewrap tests in normal host context
+- full unittest discover with correct top-level
+- full pytest
+- verify Codex argv remains unchanged
+- verify 014 workspace/publication ceilings unchanged
+- verify 013 report/needs_attention semantics unchanged
+- bounded Claude and AGY read-only/workspace-write runtime probes only if needed; no external publication
+
+HARD SAFETY:
+NO git commit, push, amend, reset, rebase, clean, stash, force, or history rewrite.
+NO Sites save/deploy/publish. NO credential output. Preserve unrelated files.
+Do not delete the prior Opus review. Do not claim network isolation.
+
+WRITE REPORT:
+/home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER-REMEDIATION.md
+Include exact changed files since pre-remediation state, each Opus finding disposition, exact test counts, runtime evidence, residual risks, and verdict.
+End marker exactly: QODER_GLM53_FLASH_XHIGH_SANDBOX_PARITY_015_REMEDIATION_READY
+Final response: PASS / PASS_WITH_FINDINGS / FAIL. Do not commit.

@@ -1,0 +1,34 @@
+TASK: E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015 COMMIT-READINESS FINAL REVIEW
+ROLE: Independent final reviewer — Claude Opus 5 / medium
+MODE: READ ONLY. Do not modify tracked files, services, Git state, or external systems.
+WORKSPACE: /home/b827262/project/e500-codex-smoke/gpt-codex-bridge
+BASELINE HEAD: b1375230a0027aa00b2842a1f6fb669846a67d75
+
+INPUTS:
+- /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REVIEW.md
+- /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER-REMEDIATION.md
+- /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-REREVIEW.md
+- /home/b827262/project/e500-codex-smoke/reports/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-QODER-COMMIT-READINESS.md
+- current uncommitted working tree
+
+Qoder commit-readiness claims an exact 11-path candidate and READY_TO_COMMIT=YES.
+REVIEW REQUIREMENTS:
+1. Verify the actual current diff and independently derive whether the proposed 11 paths are complete and minimal.
+2. Check each of the 8 modified bridge paths, 2 new tests/fixture, and reports/sites-version-state.json single-field update for 015 attribution; detect unrelated or missing bytes.
+3. Verify fixture executable mode 755 matters and is represented in the commit candidate.
+4. Verify Qoder's isolated candidate method: git archive HEAD + only proposed bytes, candidate outside /tmp, no .git, exact delta, no dirty-tree dependency.
+5. Re-run safe tests as useful. Distinguish nested-bwrap skips from host defects.
+6. Re-check Codex argv no-regression, 013 failure/needs_attention semantics, 014 workspace/publication ceilings, and the remaining MEDIUM-2 env-inheritance finding.
+7. Decide whether MEDIUM-2 is still non-blocking for commit.
+8. Assess the /tmp operational note: bwrap --tmpfs /tmp shadows a checkout physically under /tmp. Decide whether this is merely test/candidate-location behavior or a production correctness/security issue.
+9. Review evidence-report inclusion policy: Qoder marked 015 reports/prompts optional. State whether the 11-path code/state commit is sufficient, and whether evidence should be a separate docs commit.
+10. Confirm no staging/commit/push/Sites/external publication occurred and identify any runtime/scratch artifacts that must stay excluded.
+OUTPUT:
+Return a complete durable review and, if writable, write a copy to:
+/home/b827262/.claude/projects/-home-b827262-project-e500-codex-smoke/handoff/E500-BRIDGE-SANDBOX-ENFORCEMENT-PARITY-015-CLAUDE-COMMIT-READINESS.md
+
+Allowed FINAL_VERDICT: PASS, PASS_WITH_NONBLOCKING_FINDINGS, PASS_WITH_FIX_REQUIRED, FAIL.
+State READY_TO_COMMIT yes/no and give the exact approved path list or corrections.
+If READY_TO_COMMIT=yes, recommend one commit subject and state whether evidence reports should be same commit, separate docs commit, or remain uncommitted.
+End marker exactly: CLAUDE_OPUS5_MEDIUM_SANDBOX_PARITY_015_COMMIT_READINESS_COMPLETE
+Do not commit or push.

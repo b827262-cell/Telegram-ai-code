@@ -123,6 +123,13 @@ class AgyRunnerTests(unittest.TestCase):
             workspace = settings.default_workspace
             expected_prefix = [
                 "bwrap",
+                "--clearenv",
+                "--setenv",
+                "HOME",
+                str(home),
+                "--setenv",
+                "PATH",
+                os.environ["PATH"],
                 "--ro-bind",
                 "/",
                 "/",

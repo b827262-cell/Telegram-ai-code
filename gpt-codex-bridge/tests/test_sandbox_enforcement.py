@@ -25,6 +25,7 @@ from bridge.config import Settings
 from bridge.models import Job
 from bridge.sandbox import (
     DEFAULT_BWRAP_BIN,
+    SANDBOX_ENV_ALLOWLIST,
     SANDBOX_MECHANISM_BY_PROVIDER,
     SandboxEnforcementError,
     SandboxModeError,
@@ -34,6 +35,7 @@ from bridge.sandbox import (
 from bridge.worker import Worker
 
 FIXTURE_TOOL = Path(__file__).resolve().parent / "fixtures" / "sandbox_probe_tool.sh"
+ENV_PROBE_TOOL = Path(__file__).resolve().parent / "fixtures" / "sandbox_env_probe_tool.sh"
 # Gate the real-bwrap class on the same functional self-test production
 # enforcement uses, not on binary presence: a present-but-unusable bwrap
 # (nested sandboxes, hardened CI) must skip honestly instead of producing
@@ -121,7 +123,10 @@ class SandboxLaunchPlanMappingTests(unittest.TestCase):
         self.workspace.mkdir()
         self.home = fake_home(self.directory)
         self._stack.enter_context(
-            patch.dict("os.environ", {"HOME": str(self.home)})
+            patch.dict(
+                "os.environ",
+                {"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+            )
         )
         self._stack.enter_context(
             patch("bridge.sandbox._execute_probe", side_effect=probe_ok)
@@ -131,6 +136,13 @@ class SandboxLaunchPlanMappingTests(unittest.TestCase):
         flag = "--bind" if workspace_write else "--ro-bind"
         return [
             DEFAULT_BWRAP_BIN,
+            "--clearenv",
+            "--setenv",
+            "HOME",
+            str(self.home),
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
             "--ro-bind",
             "/",
             "/",
@@ -220,9 +232,17 @@ class SandboxLaunchPlanMappingTests(unittest.TestCase):
         )
         prefix = list(plan.argv_prefix)
         self.assertNotIn(str(empty_home / ".claude"), prefix)
-        self.assertIn("--ro-bind", prefix)
-        workspace_index = prefix.index("--ro-bind", 10)
-        self.assertEqual(prefix[workspace_index + 1], str(self.workspace))
+        die_index = prefix.index("--die-with-parent")
+        self.assertEqual(
+            prefix[die_index - 3 : die_index],
+            ["--ro-bind", str(self.workspace), str(self.workspace)],
+        )
+        self.assertIn("--setenv", prefix)
+        # No PATH in the provided environment: HOME is set, PATH is not.
+        self.assertEqual(
+            prefix[prefix.index("--setenv", 1) + 1 : prefix.index("--setenv", 1) + 6],
+            ["HOME", str(empty_home), "--ro-bind", "/", "/"],
+        )
 
     def test_unknown_provider_fails_closed(self) -> None:
         with self.assertRaises(SandboxEnforcementError) as raised:
@@ -240,6 +260,124 @@ class SandboxLaunchPlanMappingTests(unittest.TestCase):
             combined,
             [*plan.argv_prefix, "claude", "-p", "hi"],
         )
+
+
+class SandboxEnvironmentPolicyTests(unittest.TestCase):
+    """016: sandboxed children start from --clearenv plus the allowlist only."""
+
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self.directory = self._stack.enter_context(tempfile.TemporaryDirectory())
+        self.workspace = Path(self.directory) / "repo"
+        self.workspace.mkdir()
+        # Plan building must not depend on the host having bwrap installed;
+        # the real-wrapper child environment is proven in
+        # RealChildEnvironmentPolicyTests.
+        self._stack.enter_context(
+            patch("bridge.sandbox._execute_probe", side_effect=probe_ok)
+        )
+
+    @staticmethod
+    def _setenv_entries(prefix: list[str]) -> dict[str, str]:
+        entries: dict[str, str] = {}
+        index = 0
+        while index < len(prefix):
+            if prefix[index] == "--setenv":
+                entries[prefix[index + 1]] = prefix[index + 2]
+                index += 3
+            else:
+                index += 1
+        return entries
+
+    def host_env(self) -> dict[str, str]:
+        return {
+            "HOME": str(self.workspace / "home"),
+            "PATH": "/usr/bin:/bin",
+            "E500_016_SENTINEL": "leak-me-now",
+            "TELEGRAM_BOT_TOKEN": "telegram-value",
+            "MCP_BEARER_TOKEN": "bridge-value",
+            "MEETING_API_TOKEN": "meeting-value",
+            "GEMINI_API_KEY": "gemini-value",
+            "GOOGLE_API_KEY": "google-value",
+            "ANTHROPIC_API_KEY": "anthropic-value",
+            "HTTPS_PROXY": "http://user:proxy-secret@proxy.internal:8080",
+            "GITHUB_TOKEN": "gh-value",
+            "LC_CTYPE": "C.UTF-8",
+            "TERM": "xterm-256color",
+            "NODE_PATH": "/host/node/modules",
+            "XDG_CONFIG_HOME": str(self.workspace / "xdg"),
+        }
+
+    def test_prefix_clears_environment_and_forwards_only_allowlisted_values(
+        self,
+    ) -> None:
+        env = self.host_env()
+        for provider in ("claude", "agy"):
+            with self.subTest(provider=provider):
+                plan = sandbox_launch_plan(
+                    provider, "workspace-write", self.workspace, env=env
+                )
+                prefix = list(plan.argv_prefix)
+                self.assertEqual(prefix[0], DEFAULT_BWRAP_BIN)
+                self.assertEqual(prefix[1], "--clearenv")
+                entries = self._setenv_entries(prefix)
+                self.assertEqual(set(entries), SANDBOX_ENV_ALLOWLIST)
+                self.assertEqual(entries["HOME"], str(self.workspace / "home"))
+                self.assertEqual(entries["PATH"], "/usr/bin:/bin")
+
+    def test_values_come_from_provided_env_not_ambient_environment(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"PATH": "/ambient/paths", "E500_016_SENTINEL": "ambient-leak"},
+        ), patch("bridge.sandbox._which", return_value="/usr/bin/bwrap"):
+            plan = sandbox_launch_plan(
+                "claude",
+                "read-only",
+                self.workspace,
+                env={"HOME": "/only/home", "PATH": "/provided/bin"},
+            )
+            prefix = list(plan.argv_prefix)
+        entries = self._setenv_entries(prefix)
+        self.assertEqual(entries, {"HOME": "/only/home", "PATH": "/provided/bin"})
+        self.assertNotIn("/ambient/paths", prefix)
+        self.assertNotIn("ambient-leak", prefix)
+
+    def test_sentinel_and_sensitive_values_never_appear_in_prefix(self) -> None:
+        plan = sandbox_launch_plan(
+            "claude", "read-only", self.workspace, env=self.host_env()
+        )
+        prefix = list(plan.argv_prefix)
+        for forbidden in (
+            "E500_016_SENTINEL",
+            "leak-me-now",
+            "TELEGRAM_BOT_TOKEN",
+            "MCP_BEARER_TOKEN",
+            "MEETING_API_TOKEN",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "HTTPS_PROXY",
+            "proxy-secret",
+            "GITHUB_TOKEN",
+            "gh-value",
+            "/host/node/modules",
+        ):
+            self.assertNotIn(forbidden, prefix)
+
+    def test_danger_full_access_has_no_environment_policy(self) -> None:
+        for provider in ("claude", "agy"):
+            with self.subTest(provider=provider):
+                plan = sandbox_launch_plan(
+                    provider, "danger-full-access", self.workspace, env=self.host_env()
+                )
+                self.assertEqual(plan.argv_prefix, ())
+                self.assertEqual(
+                    plan.mechanism, "none (unrestricted by definition)"
+                )
+
+    def test_allowlist_is_minimal_and_proven(self) -> None:
+        self.assertEqual(SANDBOX_ENV_ALLOWLIST, frozenset({"HOME", "PATH"}))
 
 
 class SandboxFailClosedTests(unittest.TestCase):
@@ -592,6 +730,71 @@ class RealBubblewrapEnforcementTests(unittest.TestCase):
                 CLAUDE_EFFORT,
             ],
         )
+
+
+@unittest.skipUnless(
+    REAL_BWRAP_UNAVAILABLE_REASON is None,
+    f"functional bwrap enforcement unavailable: {REAL_BWRAP_UNAVAILABLE_REASON}",
+)
+class RealChildEnvironmentPolicyTests(unittest.TestCase):
+    """The real wrapper must hand the child exactly the allowlisted names."""
+
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self.directory = self._stack.enter_context(tempfile.TemporaryDirectory())
+        self.home = fake_home(self.directory)
+        self.settings = make_settings(
+            self.directory,
+            CLAUDE_BIN=str(ENV_PROBE_TOOL),
+            AGY_BIN=str(ENV_PROBE_TOOL),
+        )
+        self.settings.ensure_runtime_dirs()
+        # Values the runner env helpers do NOT strip for these providers plus
+        # an arbitrary sentinel: only the bwrap environment policy can keep
+        # them out of the child.
+        self._stack.enter_context(
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": str(self.home),
+                    "E500_016_SENTINEL": "leak-marker-016",
+                    "GEMINI_API_KEY": "gemini-secret-value",
+                    "ANTHROPIC_API_KEY": "anthropic-secret-value",
+                    "HTTPS_PROXY": "http://user:proxy-secret@proxy.internal:8080",
+                    "GITHUB_TOKEN": "gh-secret-value",
+                },
+            )
+        )
+
+    @staticmethod
+    def _summary_lines(text: str) -> dict[str, str]:
+        return dict(
+            part.split("=", 1) for part in text.split() if "=" in part
+        )
+
+    def test_claude_child_receives_only_allowlisted_env_names(self) -> None:
+        outcome = ClaudeRunner(self.settings).run(
+            claude_job(self.settings, sandbox_mode="read-only")
+        )
+        self.assertTrue(outcome.succeeded, outcome.report["summary"])
+        lines = self._summary_lines(outcome.report["summary"])
+        # PWD is set by bwrap itself to the job cwd, never inherited.
+        self.assertEqual(lines["CHILD_ENV_NAMES"], "HOME,PATH,PWD")
+        self.assertEqual(lines["HOME_SET"], "1")
+        self.assertEqual(lines["PATH_SET"], "1")
+        self.assertEqual(lines["SENTINEL_PRESENT"], "0")
+
+    def test_agy_child_receives_only_allowlisted_env_names(self) -> None:
+        outcome = AgyRunner(self.settings).run(
+            agy_job(self.settings, sandbox_mode="read-only")
+        )
+        self.assertTrue(outcome.succeeded, outcome.report["summary"])
+        lines = self._summary_lines(outcome.report["summary"])
+        self.assertEqual(lines["CHILD_ENV_NAMES"], "HOME,PATH,PWD")
+        self.assertEqual(lines["HOME_SET"], "1")
+        self.assertEqual(lines["PATH_SET"], "1")
+        self.assertEqual(lines["SENTINEL_PRESENT"], "0")
 
 
 class LoopbackBindEnvironmentTests(unittest.TestCase):

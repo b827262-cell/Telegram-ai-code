@@ -11,9 +11,13 @@ Isolation boundary of the bubblewrap wrapper (claude/agy): this is
 filesystem and mount-namespace isolation ONLY. It does NOT provide network,
 PID, IPC, UTS, seccomp/syscall-filtering, or resource-limit isolation, and
 it is not a full container. A wrapped child keeps full network access and
-inherits the caller's environment minus the adapter secrets the runner
-environment helpers strip. Statements about what a sandboxed job cannot do
-must be limited to filesystem writes outside the allowlisted write targets.
+starts from an EMPTY environment (bwrap --clearenv) populated only with the
+proven-necessity allowlist in SANDBOX_ENV_ALLOWLIST, with values taken from
+the runner-provided environment; no host variable is forwarded wholesale.
+Statements about what a sandboxed job cannot do must be limited to
+filesystem writes outside the allowlisted write targets and to variables
+outside the environment allowlist. danger-full-access jobs remain
+unrestricted by definition, environment included.
 """
 
 from __future__ import annotations
@@ -59,6 +63,16 @@ _CREDENTIAL_FILES_READ_ONLY: Final[dict[str, tuple[str, ...]]] = {
     "claude": (".claude/.credentials.json",),
     "agy": (".gemini/oauth_creds.json",),
 }
+
+# Explicit environment policy for sandboxed claude/agy children: bwrap
+# --clearenv followed by --setenv for exactly these names. Both providers
+# authenticate through credential files under HOME (re-bound read-only by the
+# wrapper) and need PATH for exec/module resolution; real provider auth
+# canaries proved no other variable is required. Values are taken from the
+# runner-provided environment — never copied wholesale from os.environ — so
+# tokens, API keys, proxy credentials, and any other host secret stay out of
+# the sandboxed child even when present in the host environment.
+SANDBOX_ENV_ALLOWLIST: Final[frozenset[str]] = frozenset({"HOME", "PATH"})
 
 
 class SandboxModeError(ValueError):
@@ -139,15 +153,33 @@ def _bwrap_unavailable_reason(
     return None
 
 
+def _sandbox_env_argv(
+    home: Path,
+    env: dict[str, str] | None,
+) -> list[str]:
+    argv = ["--clearenv"]
+    # HOME always tracks the state-dir bind source so the child's view of its
+    # own home matches the carved-out directories above, even when the
+    # caller-provided environment lacks HOME entirely.
+    argv += ["--setenv", "HOME", str(home)]
+    for name in sorted(SANDBOX_ENV_ALLOWLIST - {"HOME"}):
+        value = (os.environ if env is None else env).get(name)
+        if value is not None:
+            argv += ["--setenv", name, value]
+    return argv
+
+
 def _bwrap_argv(
     provider: str,
     mode: str,
     workspace: Path,
     home: Path,
     bwrap_bin: str,
+    env: dict[str, str] | None = None,
 ) -> tuple[str, ...]:
-    argv: list[str] = [
-        bwrap_bin,
+    argv: list[str] = [bwrap_bin]
+    argv += _sandbox_env_argv(home, env)
+    argv += [
         "--ro-bind",
         "/",
         "/",
@@ -204,5 +236,7 @@ def sandbox_launch_plan(
         raise SandboxEnforcementError(provider, mode, reason)
     environment = os.environ if env is None else env
     home_value = environment.get("HOME") or str(Path.home())
-    prefix = _bwrap_argv(provider, mode, Path(workspace), Path(home_value), bwrap_bin)
+    prefix = _bwrap_argv(
+        provider, mode, Path(workspace), Path(home_value), bwrap_bin, environment
+    )
     return SandboxLaunchPlan(provider, mode, mechanism, prefix)

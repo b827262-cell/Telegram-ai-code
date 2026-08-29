@@ -7,6 +7,14 @@ import os
 from pathlib import Path
 import re
 
+from .workspaces import (
+    WorkspaceRoute,
+    WorkspaceRoutingError,
+    resolve_route,
+    resolve_workspace_path,
+    validate_workspace_alias,
+)
+
 
 class ConfigurationError(ValueError):
     """Raised when required runner configuration is missing or unsafe."""
@@ -91,6 +99,7 @@ class Settings:
     github_report_directory: str = "reports/auto-loop"
     github_report_timeout_seconds: float = 30.0
     configured_secret_values: tuple[str, ...] = field(default=(), repr=False)
+    workspace_aliases: dict[str, Path] = field(default_factory=dict)
 
     @classmethod
     def from_env(
@@ -127,6 +136,29 @@ class Settings:
             )
         if default_workspace not in workspaces:
             raise ConfigurationError("CODEX_DEFAULT_WORKSPACE is not in CODEX_ALLOWED_WORKSPACES")
+
+        # An alias may only ever name a directory the allowlist already permits;
+        # resolution here is convenience, never capability expansion.
+        workspace_aliases: dict[str, Path] = {}
+        raw_aliases = values.get("CODEX_WORKSPACE_ALIASES", "")
+        for entry in [item for item in raw_aliases.split(os.pathsep) if item.strip()]:
+            alias_token, separator, target = entry.partition("=")
+            if not separator:
+                raise ConfigurationError(
+                    "CODEX_WORKSPACE_ALIASES entries must be alias=/absolute/path"
+                )
+            try:
+                alias_key = validate_workspace_alias(alias_token.strip())
+                alias_path = resolve_workspace_path(alias_key, target.strip())
+            except WorkspaceRoutingError as exc:
+                raise ConfigurationError(f"CODEX_WORKSPACE_ALIASES: {exc}") from exc
+            if alias_key in workspace_aliases:
+                raise ConfigurationError(f"CODEX_WORKSPACE_ALIASES contains duplicate alias: {alias_key}")
+            if alias_path not in workspaces:
+                raise ConfigurationError(
+                    f"workspace alias {alias_key} is not in CODEX_ALLOWED_WORKSPACES"
+                )
+            workspace_aliases[alias_key] = alias_path
 
         data_dir = _path(
             values.get(
@@ -206,6 +238,7 @@ class Settings:
                 values, "MEETING_READ_TIMEOUT_SECONDS", 330.0
             ),
             configured_secret_values=configured_secret_values,
+            workspace_aliases=workspace_aliases,
         )
 
     def ensure_runtime_dirs(self) -> None:
@@ -228,6 +261,37 @@ class Settings:
         if normalized not in self.allowed_workspaces:
             raise ConfigurationError("job workspace is not in CODEX_ALLOWED_WORKSPACES")
         return normalized
+
+    def resolve_workspace_route(
+        self,
+        *,
+        provider: str,
+        sandbox_mode: str,
+        external_publication_requested: bool = False,
+        alias: object = None,
+    ) -> WorkspaceRoute:
+        """Map one opaque workspace alias to an allowlisted path and enforce policy.
+
+        Every adapter resolves workspaces through here, so an HTTP request and a
+        Telegram command cannot disagree about what a named workspace may do.
+        """
+
+        route = resolve_route(
+            aliases=self.workspace_aliases,
+            allowed_workspaces=self.allowed_workspaces,
+            default_workspace=self.default_workspace,
+            provider=provider,
+            sandbox_mode=sandbox_mode,
+            external_publication_requested=external_publication_requested,
+            alias=alias,
+        )
+        # Re-check rather than trust the alias table: the allowlist is the
+        # containment boundary and stays the authority on every dispatch.
+        return WorkspaceRoute(
+            alias=route.alias,
+            workspace=self.validate_workspace(route.workspace),
+            policy=route.policy,
+        )
 
     @property
     def secret_values(self) -> tuple[str, ...]:

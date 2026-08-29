@@ -1,0 +1,57 @@
+TASK: E500-DURABLE-WORKSPACE-ROUTING-014 — prove a durable chain job can write inside the bridge workspace
+
+You are running as the GPT/Codex stage of a durable workflow with:
+  workspace alias = bridge   (resolved server-side to this checkout's gpt-codex-bridge directory)
+  sandbox mode    = workspace-write
+  external publication = denied for this workspace
+
+Your only job is to prove the routing works. Do not implement, refactor, fix or
+document anything else.
+
+STEP 1 — confirm where you actually are
+  Run `pwd` and `git rev-parse --show-toplevel` and confirm you are inside the
+  gpt-codex-bridge checkout, not the ai-meeting-room workspace. Record both in
+  your report summary.
+
+STEP 2 — prove the workspace is genuinely writable
+  Edit exactly one file:
+      tests/fixtures/durable-routing-014.txt
+  Change ONLY its final line, replacing
+
+      token=pre-014-unrouted
+
+  with
+
+      token=routed-014-<the UTC timestamp you observed in step 1, format HHMMSS>
+
+  Every line above it must remain byte-identical. Do not create, delete, rename
+  or touch any other file anywhere.
+
+STEP 3 — prove tests still run from this workspace
+  From the gpt-codex-bridge directory run:
+      python3 -m pytest -q tests
+      python3 -m unittest discover -s tests -t .
+  Both must pass. Paste the final summary lines into your report's tests entries.
+
+STEP 4 — self-verify before reporting
+  WARNING: this checkout intentionally carries unrelated uncommitted work in
+  bridge/, adapters/ and tests/. Never revert, stash, clean, restore or checkout
+  any file you did not create yourself in step 2. Do not try to make the tree
+  look clean.
+  The specimen is already tracked in the git index, so verify with:
+      git diff --name-only -- tests/fixtures/durable-routing-014.txt
+      git diff -- tests/fixtures/durable-routing-014.txt
+  Expect exactly one changed line: the removed `-token=pre-014-unrouted` and the
+  added `+token=routed-014-...`. Report every path you modified in
+  "changed_files"; if it is not exactly the specimen, say so honestly in the
+  report rather than hiding it.
+
+REPORT CONTRACT
+  Emit exactly one JSON object as your final output, matching the seven required
+  fields in the contract you were given, with sandbox_mode set to the mode this
+  job was launched with.
+  Put the step 1 paths, the new token value, and the two test summary lines in
+  "summary". List only the specimen file in "changed_files". Set
+  "needs_attention" to true ONLY if a human must intervene to finish this task;
+  unrelated dirty files elsewhere in this repository are ambient conditions and
+  belong in "git_status", not in needs_attention.

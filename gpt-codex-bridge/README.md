@@ -49,6 +49,8 @@ complete; the final stage is deterministically recorded as
 
 - `TELEGRAM_ALLOWED_CHAT_ID` 在解析 message 前比對；未授權更新不回覆、不 enqueue、不執行 Codex。
 - `CODEX_ALLOWED_WORKSPACES` 是明確的絕對路徑 allowlist；Telegram 不提供 `cwd`，所有 Telegram job 都使用 `CODEX_DEFAULT_WORKSPACE`。
+- HTTP `/run` 與 `/workflow` 的 `workspace` 欄位只接受 `CODEX_WORKSPACE_ALIASES` 中由 server 定義的 alias；絕對路徑、`../`、編碼 traversal 與 symlink 一律拒絕，alias 對應路徑在 startup 解析 realpath 後仍必須成立於 allowlist 內，因此 alias 永遠不能擴大可寫邊界。未帶 `workspace` 的請求維持 `CODEX_DEFAULT_WORKSPACE` 語意。
+- 每個 workspace 由 server 端 policy 決定 `max_sandbox_mode`、允許的 provider 與 external publication；請求超過上限直接 400 且不 enqueue。`bridge` 上限為 `workspace-write` 且禁止外部發佈（必須 `noExternalWrite=true`），`meeting-room` 維持 routing 上路前的既有行為；沒有 reviewed policy 的新 alias 預設 `read-only` 且禁止發佈。這些上限是派送邊界的准入控制，不是對已經執行中 job 的 runtime 隔離——後者取決於各 provider CLI 自己是否強制 sandbox。目前只有 HTTP API 能選擇 alias；Telegram 沒有選 alias 的語法，一律路由到 `CODEX_DEFAULT_WORKSPACE`。
 - job 會持久化 `provider`/`runner`；`/gpt` 建立 `flow-*`，依序排程 Codex、agy、Claude 三個 job；`/claude` 只會 dispatch 到 ClaudeRunner，不會進 Meeting Room 或 CodexRunner。
 - `/agy` 只會 dispatch 到 AgyRunner；child environment 會移除 `GEMINI_API_KEY` 與 `GOOGLE_API_KEY`，保留 agy 已存在的 Google OAuth credential。程式不執行 `agy login`。
 - worker 使用 SQLite claim guard 加 Unix file lock，最多一個 `running` job。

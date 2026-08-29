@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .config import Settings
-from .models import SUPPORTED_PROVIDERS
+from .models import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS
 from .observability import (
     configure_logging,
     get_logger,
@@ -24,6 +24,7 @@ from .observability import (
 )
 from .queue import CodexExecAlreadyRunning, JobQueue, QueueTransitionConflict
 from .sandbox import validate_sandbox_mode
+from .workspaces import WorkspaceRoutingError
 
 
 MAX_BODY_BYTES = 64 * 1024
@@ -311,16 +312,34 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
             sandbox_mode = MODE_TO_SANDBOX.get(mode)
             if sandbox_mode is None:
                 validate_sandbox_mode(mode)
-            workspace = settings.validate_workspace(settings.default_workspace)
+            effective_sandbox_mode = sandbox_mode or "workspace-write"
             if path == "/workflow":
                 no_external_write = body.get("noExternalWrite", False)
                 if type(no_external_write) is not bool:
                     raise ValueError("noExternalWrite must be a boolean")
+                provider = DEFAULT_PROVIDER
+            else:
+                provider = str(body.get("provider") or "codex").lower()
+                if provider == "gpt":
+                    provider = "codex"
+                if provider not in SUPPORTED_PROVIDERS:
+                    raise ValueError(f"unsupported provider: {provider}")
+                no_external_write = False
+            # ``workspace`` names a server-configured alias, never a filesystem
+            # path: the resolver rejects anything that is not an opaque slug and
+            # enforces that workspace's sandbox and publication ceiling.
+            route = settings.resolve_workspace_route(
+                provider=provider,
+                sandbox_mode=effective_sandbox_mode,
+                external_publication_requested=path == "/workflow" and not no_external_write,
+                alias=body.get("workspace"),
+            )
+            if path == "/workflow":
                 workflow, job = self.queue.submit_workflow(
                     chat_id=allowed_chat_id,
                     prompt=task.strip(),
-                    workspace=workspace,
-                    sandbox_mode=sandbox_mode or "workspace-write",
+                    workspace=route.workspace,
+                    sandbox_mode=effective_sandbox_mode,
                     external_publication_enabled=not no_external_write,
                 )
                 self._log(
@@ -329,6 +348,7 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
                     job_id=safe_id(job.id),
                     stage=workflow.current_stage,
                     sandbox_mode=job.sandbox_mode,
+                    workspace_alias=safe_id(route.alias),
                 )
                 self._send(
                     HTTPStatus.ACCEPTED,
@@ -339,16 +359,11 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            provider = str(body.get("provider") or "codex").lower()
-            if provider == "gpt":
-                provider = "codex"
-            if provider not in SUPPORTED_PROVIDERS:
-                raise ValueError(f"unsupported provider: {provider}")
             job = self.queue.submit(
                 chat_id=allowed_chat_id,
                 prompt=task.strip(),
-                workspace=workspace,
-                sandbox_mode=sandbox_mode or "workspace-write",
+                workspace=route.workspace,
+                sandbox_mode=effective_sandbox_mode,
                 provider=provider,
             )
             self._log(
@@ -356,6 +371,7 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
                 job_id=safe_id(job.id),
                 provider=job.provider,
                 sandbox_mode=job.sandbox_mode,
+                workspace_alias=safe_id(route.alias),
             )
             self._send(HTTPStatus.ACCEPTED, {"ok": True, "job": _job_payload(settings, job)})
         except CodexExecAlreadyRunning as exc:
@@ -387,6 +403,20 @@ class BridgeAPIHandler(BaseHTTPRequestHandler):
                     "code": "WORKFLOW_STATE_CONFLICT",
                     "message": "Workflow is no longer queued and was not cancelled.",
                 },
+            )
+        except WorkspaceRoutingError as exc:
+            # Subclasses ValueError, so it must be matched first to keep the
+            # machine-readable refusal code intact for the client.
+            self._log(
+                "workspace_route_denied",
+                path=safe_path(path),
+                level=logging.WARNING,
+                code=exc.code,
+                **safe_error_metadata(exc),
+            )
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "code": exc.code, "message": str(exc)},
             )
         except (ValueError, TypeError) as exc:
             self._log(

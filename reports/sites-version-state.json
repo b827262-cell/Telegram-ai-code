@@ -42,8 +42,8 @@
   "needs_attention_semantics_013": "closed_pass_with_nonblocking_findings",
   "needs_attention_semantics_013_specimen_flow": "flow-d47d7f6bb3614992",
   "needs_attention_semantics_013_review_job": "job-5673268a0ace4457",
-  "bridge_workspace_allowlist": "ai-meeting-room-only",
-  "durable_workspace_routing_014": "not_started",
+  "bridge_workspace_allowlist": "ai-meeting-room-and-gpt-codex-bridge",
+  "durable_workspace_routing_014": "closed_pass",
   "bridge_attribution_anchor_sha": "3a9934693d4c3c78bdf6f384f054a2aedab4f0bf",
   "bridge_dependency_anchor_sha": "17cf2c4b2aaf76a30748d93560858a0a2c741d8e",
   "bridge_green_baseline_sha": "17cf2c4b2aaf76a30748d93560858a0a2c741d8e",
@@ -51,5 +51,12 @@
   "bridge_self_contained_baseline_isolated_unittest": "116 passed 0 errors",
   "bridge_self_contained_baseline_isolated_pytest": "116 passed 26 subtests 0 collection errors",
   "bridge_self_contained_baseline_import_sweep": "25/25 modules ok",
-  "bridge_pushed": false
+  "bridge_pushed": false,
+  "bridge_workspace_aliases": "meeting-room,bridge",
+  "bridge_pre014_checkpoint_sha": "34d81e9733d834897167e6a643c45ca1f2b5bbac",
+  "durable_workspace_routing_014_acceptance": "pass",
+  "durable_workspace_routing_014_review_job": "job-f5cca594af824237",
+  "durable_workspace_routing_014_specimen_flow": "flow-163c7d3c14694430",
+  "durable_workspace_routing_014_publication_containment": "pass",
+  "sandbox_enforcement_parity_015": "not_started"
 }

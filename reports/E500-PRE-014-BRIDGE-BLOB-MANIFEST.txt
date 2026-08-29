@@ -1,0 +1,18 @@
+# Pre-014 blob manifest -- working-tree state of every bridge file that was ALREADY uncommitted before task 014 began.
+# Not included: bridge/config.py and bridge/workspaces.py (014's own edits) and bridge/models.py (committed in 17cf2c4).
+# Baseline commit at capture: ef32b184ecd6de2ee8c188bbd6f8d8097ad22e98
+# Recorded: 2026-08-29T15:27:37+08:00
+# Any later file whose 'git hash-object' differs from its blob here has been touched by 014.
+
+0800c05b5a85503fef711ec49f5527d4aa26d9e1  gpt-codex-bridge/.env.example
+3a2a8da9dcb2da41d1a0f3dc73a84b8677db9806  gpt-codex-bridge/README.md
+23740390281d11458ea316a1fe47c8f20abc4281  gpt-codex-bridge/adapters/telegram.py
+e9807d92e6e489699716c87f1c9add78c423c67c  gpt-codex-bridge/bridge/api.py
+540988c24cff04e70255b8118be7c6f296140c35  gpt-codex-bridge/bridge/claude_runner.py
+d0a5007a76bba1d6103131bfb9b59d6ac9b630d0  gpt-codex-bridge/bridge/github_reporter.py
+5ad344e625a6cea3ace524230f89e4a542a6c294  gpt-codex-bridge/bridge/observability.py
+08865ff8d78307585aaeccdc2fe91a8d131faa04  gpt-codex-bridge/tests/test_api.py
+0e4db07670b8e3a65e9bde3c381fa5bf7a2c67e4  gpt-codex-bridge/tests/test_api_logging.py
+576328f959f08733b12b092d766ad818ff226eff  gpt-codex-bridge/tests/test_claude_router.py
+4947cab4ef7af12b7936002f0b1a6ebda32aab13  gpt-codex-bridge/tests/test_github_reporter.py
+65d9efefb5e62f8de129f552673e991410e3f352  gpt-codex-bridge/tests/test_telegram_adapter.py

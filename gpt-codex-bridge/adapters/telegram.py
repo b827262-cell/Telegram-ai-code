@@ -23,13 +23,14 @@ from bridge.meeting import (
     response_text,
     summary_text,
 )
-from bridge.models import Job, Notification
+from bridge.models import DEFAULT_PROVIDER, Job, Notification
 from bridge.queue import CANCELLED_BY_OPERATOR_PREFIX, CodexExecAlreadyRunning, JobQueue
 from bridge.sandbox import (
     DEFAULT_SANDBOX_MODE,
     SandboxModeError,
     validate_sandbox_mode,
 )
+from bridge.workspaces import WorkspaceRoutingError
 
 
 class TelegramAPIError(RuntimeError):
@@ -393,14 +394,24 @@ class TelegramAdapter:
             return "用法：/gpt [--no-external-write] <task> 或 /gpt-smoke <task>"
         if len(prompt) > self.settings.max_prompt_length:
             return f"task 太長；上限為 {self.settings.max_prompt_length} 字元。"
+        # Telegram names no workspace, so this resolves the configured default.
+        # It still passes through the shared resolver so the same workspace policy
+        # applies to a /gpt dispatch as to an HTTP dispatch.
         try:
+            route = self.settings.resolve_workspace_route(
+                provider=DEFAULT_PROVIDER,
+                sandbox_mode=DEFAULT_SANDBOX_MODE,
+                external_publication_requested=not no_external_write,
+            )
             workflow, job = self.queue.submit_workflow(
                 chat_id=chat_id,
                 prompt=prompt,
-                workspace=self.settings.default_workspace,
+                workspace=route.workspace,
                 sandbox_mode=DEFAULT_SANDBOX_MODE,
                 external_publication_enabled=not no_external_write,
             )
+        except WorkspaceRoutingError as exc:
+            return f"workspace 政策拒絕派送（{exc.code}）；workflow 未建立。"
         except CodexExecAlreadyRunning as exc:
             lines = [
                 "Codex exec 執行中，/gpt 尚未派送。",
@@ -441,13 +452,19 @@ class TelegramAdapter:
         # Workspace is selected only from validated configuration. Telegram text
         # is never interpreted as a filesystem path or command line.
         try:
+            route = self.settings.resolve_workspace_route(
+                provider=provider,
+                sandbox_mode=sandbox_mode,
+            )
             job = self.queue.submit(
                 chat_id=chat_id,
                 prompt=prompt,
-                workspace=self.settings.default_workspace,
+                workspace=route.workspace,
                 sandbox_mode=sandbox_mode,
                 provider=provider,
             )
+        except WorkspaceRoutingError as exc:
+            return f"workspace 政策拒絕派送（{exc.code}）；/{command} 未建立 job。"
         except CodexExecAlreadyRunning as exc:
             lines = [
                 f"已有工作區 job 執行中，/{command} 尚未派送。",

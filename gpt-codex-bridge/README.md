@@ -15,7 +15,7 @@ Telegram getUpdates (long polling, no inbound port)
        one worker + file lock
              │
              ├── provider=codex → codex exec --sandbox <job.sandbox_mode>
-             ├── provider=claude → claude -p <prompt>
+             ├── provider=claude → claude -p <prompt> --model claude-opus-5 --effort medium
              └── provider=agy → agy -p <prompt> --model gemini-3.7-flash-high --output-format json
              │
              ▼
@@ -36,6 +36,13 @@ provider jobs and never call the Meeting Room. `/all` and `/roundtable` remain
 Meeting Room operations and may include the remote GPT agent. There must remain
 only one Telegram polling process.
 
+For live smoke or acceptance work, use `/gpt-smoke <task>` (or
+`/gpt --no-external-write <task>`). The bridge persists that prohibition on the
+workflow row, so it survives queue restart/recovery. Codex → AGY → Claude still
+complete; the final stage is deterministically recorded as
+`skipped_no_external_write`, even with `GITHUB_REPORT_ENABLED=true`. Plain
+`/gpt <task>` remains backward-compatible and may publish when globally enabled.
+
 未來的 MCP/HTTP adapter 只需要呼叫同一個 `JobQueue.submit()`；adapter 不得各自啟動 Codex。
 
 ## Security boundary
@@ -48,7 +55,7 @@ only one Telegram polling process.
 - 每個 job 在 SQLite 保存自己的 `sandbox_mode`，只允許 `read-only`、`workspace-write`、`danger-full-access`；未知值直接拒絕。
 - `/run-full` 只接受 `TELEGRAM_ALLOWED_CHAT_ID`；Codex 使用 argv list、`shell=False`、job-specific `--sandbox`、timeout，程式碼不使用 `--dangerously-bypass-approvals-and-sandbox` 或 `--yolo`。
 - Telegram adapter 沒有 raw shell API；`/run` 是 Codex task，不是 shell command endpoint。
-- `/claude` 使用 `claude -p <prompt>`（argv-based，`shell=False`）；不使用 `--dangerously-skip-permissions`，也不啟動第二個 Telegram polling process。
+- `/claude` 使用 `claude -p <prompt> --model claude-opus-5 --effort medium`（argv-based，`shell=False`）；不使用 `--dangerously-skip-permissions`，也不啟動第二個 Telegram polling process。
 - worker 不呼叫 Telegram API；job terminal update 與 `notifications.pending` 建立在同一個 SQLite transaction。
 - Telegram adapter 定期 drain pending notifications；網路、5xx、429 等暫時性失敗會保留 retryable row，永久 Telegram 4xx 則保留原 row 與診斷並標記 `dead_lettered_at`，不再無限重試。
 - 功能啟用前已 terminal 的歷史 job 不會被回補通知；notification outbox 只在新的 terminal transition 時建立。
@@ -107,6 +114,15 @@ scripts/run-worker.sh
 scripts/run-telegram.sh
 ```
 
+The web control-plane has a separate native HTTP dependency: its public BFF
+`GET /api/tg/health` proxies the authenticated bridge `GET /health`, and live
+workflow dispatch maps `/api/tg/workflow` to native `POST /workflow`. It is not
+a queue-only health check. Install the repository template at
+`systemd/gpt-codex-api.service` as a user unit only after creating the private
+`~/.config/gpt-codex-bridge/api.env` EnvironmentFile (including the bridge API
+token and normal bridge settings). The unit is intentionally not installed or
+started by this repository.
+
 The worker can be started without Telegram credentials for local queue testing. Telegram requires both the bot token and numeric allowed chat ID.
 
 Supported Telegram commands:
@@ -150,10 +166,18 @@ Meeting Room being offline does not prevent the E500 Bot, `/run*`, `/status`, or
 The optional authenticated HTTP API uses `CODEX_API_HOST` / `CODEX_API_PORT` and
 requires a random `CODEX_BRIDGE_API_TOKEN` of at least 32 characters. It exposes
 `GET /health`, `GET /status`, `GET /result/<job_id>`, `GET /workflow/<flow_id>`,
-`POST /run`, and `POST /workflow`; all routes
+`POST /run`, `POST /workflow`, and `POST /workflow/<flow_id>/cancel`; all routes
 require `Authorization: Bearer <CODEX_BRIDGE_API_TOKEN>`. API-submitted jobs use
 the configured Telegram chat ID and are automatically delivered by the same
 Telegram notification outbox when the worker finishes.
+
+The cancellation endpoint is deliberately narrow: it atomically marks an
+untouched queued workflow and its first queued job as operator-cancelled. A
+running or terminal workflow returns a conflict; no running subprocess is
+killed. The default bridge binding remains `127.0.0.1`, so a remote web host
+must use a separately authenticated private relay rather than exposing this
+listener publicly. Runtime state remains in the configured private data
+directory (方案1: `/home/b827262/.local/state/gpt-codex-bridge`).
 
 `/gpt <task>` automatically schedules the bounded sequence
 

@@ -199,7 +199,7 @@ class TelegramAdapter:
             return None
         match = _COMMAND_RE.fullmatch(text.strip())
         if not match:
-            reply = "請使用 /ping、/run <task>、/gpt <task>、/agy <task>、/claude <task>、/run-read <task>、/run-full <task>、/status、/result <job_id> 或 /workflow <flow_id>。"
+            reply = "請使用 /ping、/run <task>、/gpt <task>、/gpt-smoke <task>、/agy <task>、/claude <task>、/run-read <task>、/run-full <task>、/status、/result <job_id> 或 /workflow <flow_id>。"
             self._send_reply(chat_id, reply)
             return reply
         command = match.group("command").lower()
@@ -208,8 +208,8 @@ class TelegramAdapter:
         if command in {"start", "help"}:
             reply = (
                 "Codex job runner 已啟動。使用 /ping、/run <task>、/run-read <task>、"
-                "/run-full <task>、/gpt <task>、/agy <task>、/claude <task>、/status、"
-                "/result <job_id>、/workflow <flow_id>。/gpt 會依序接 AGY、Claude，最後上傳 GitHub 報告。"
+                "/run-full <task>、/gpt <task>、/gpt-smoke <task>、/agy <task>、/claude <task>、/status、"
+                "/result <job_id>、/workflow <flow_id>。/gpt 會依序接 AGY、Claude；/gpt-smoke 不會上傳 GitHub 報告。"
             )
         elif command == "ping":
             reply = "PONG"
@@ -217,8 +217,12 @@ class TelegramAdapter:
             reply = self._status(chat_id)
         elif command in _RUN_COMMAND_MODES:
             reply = self._submit(chat_id, args, _RUN_COMMAND_MODES[command], command)
-        elif command == "gpt":
-            reply = self._submit_workflow(chat_id, args)
+        elif command in {"gpt", "gpt-smoke"}:
+            reply = self._submit_workflow(
+                chat_id,
+                args,
+                no_external_write=command == "gpt-smoke",
+            )
         elif command == "claude":
             reply = self._submit(
                 chat_id,
@@ -243,7 +247,7 @@ class TelegramAdapter:
             reply = await self._meeting_reply(message, chat_id, command, args)
         else:
             reply = (
-                "未知命令。可用：/ping、/run、/gpt、/agy、/claude、/run-read、/run-full、/status、/result、/workflow、"
+                "未知命令。可用：/ping、/run、/gpt、/gpt-smoke、/agy、/claude、/run-read、/run-full、/status、/result、/workflow、"
                 "/hermes、/gemini、/all、/roundtable、/agents、/meeting-status、"
                 "/meeting-stop、/meeting-reset。"
             )
@@ -376,9 +380,17 @@ class TelegramAdapter:
             )
         return "\n".join(lines)
 
-    def _submit_workflow(self, chat_id: str, prompt: str) -> str:
+    def _submit_workflow(
+        self, chat_id: str, prompt: str, *, no_external_write: bool = False
+    ) -> str:
+        if prompt.startswith("--no-external-write"):
+            flag, _, prompt = prompt.partition(" ")
+            if flag != "--no-external-write":
+                return "no-external-write flag 無效；workflow 已拒絕。"
+            no_external_write = True
+            prompt = prompt.strip()
         if not prompt:
-            return "用法：/gpt <task>（完成後自動接 /agy、/claude 並上傳 GitHub 報告）"
+            return "用法：/gpt [--no-external-write] <task> 或 /gpt-smoke <task>"
         if len(prompt) > self.settings.max_prompt_length:
             return f"task 太長；上限為 {self.settings.max_prompt_length} 字元。"
         try:
@@ -387,6 +399,7 @@ class TelegramAdapter:
                 prompt=prompt,
                 workspace=self.settings.default_workspace,
                 sandbox_mode=DEFAULT_SANDBOX_MODE,
+                external_publication_enabled=not no_external_write,
             )
         except CodexExecAlreadyRunning as exc:
             lines = [
@@ -402,7 +415,8 @@ class TelegramAdapter:
         return (
             f"workflow queued {workflow.id}\n"
             f"stage=gpt job={job.id}\n"
-            "next=agy → claude → github report"
+            "next=agy → claude → "
+            + ("github report skipped (no-external-write)" if no_external_write else "github report")
         )
 
     def _submit(
@@ -426,13 +440,25 @@ class TelegramAdapter:
             return "未授權使用 danger-full-access。"
         # Workspace is selected only from validated configuration. Telegram text
         # is never interpreted as a filesystem path or command line.
-        job = self.queue.submit(
-            chat_id=chat_id,
-            prompt=prompt,
-            workspace=self.settings.default_workspace,
-            sandbox_mode=sandbox_mode,
-            provider=provider,
-        )
+        try:
+            job = self.queue.submit(
+                chat_id=chat_id,
+                prompt=prompt,
+                workspace=self.settings.default_workspace,
+                sandbox_mode=sandbox_mode,
+                provider=provider,
+            )
+        except CodexExecAlreadyRunning as exc:
+            lines = [
+                f"已有工作區 job 執行中，/{command} 尚未派送。",
+                "請等待目前任務完成後再重新執行。",
+            ]
+            lines.extend(
+                f"running job={running.id} kind={running.execution_kind} "
+                f"pid={running.pid or 'unknown'} started={running.started_at or 'unknown'}"
+                for running in exc.jobs
+            )
+            return "\n".join(lines)
         return f"queued {job.id} provider={job.provider} runner={job.runner}"
 
     def _result(self, chat_id: str, job_id: str) -> str:

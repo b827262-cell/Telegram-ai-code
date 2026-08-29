@@ -15,6 +15,10 @@ from .models import Job
 from .sandbox import validate_sandbox_mode
 
 
+CLAUDE_MODEL = "claude-opus-5"
+CLAUDE_EFFORT = "medium"
+
+
 class ClaudeRunner:
     """Run the local Claude Code CLI without interactive permission prompts."""
 
@@ -33,7 +37,17 @@ class ClaudeRunner:
         if job.provider != "claude":
             raise ValueError("ClaudeRunner can only run Claude jobs")
         self.settings.validate_workspace(job.workspace)
-        return [self.settings.claude_bin, "-p", job.prompt]
+        model = job.model or CLAUDE_MODEL
+        effort = job.effort or CLAUDE_EFFORT
+        return [
+            self.settings.claude_bin,
+            "-p",
+            job.prompt,
+            "--model",
+            model,
+            "--effort",
+            effort,
+        ]
 
     @staticmethod
     def _kill_group(process: Any) -> None:

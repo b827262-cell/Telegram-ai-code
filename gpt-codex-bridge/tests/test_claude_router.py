@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from adapters.telegram import TelegramAdapter
-from bridge.claude_runner import ClaudeRunner
+from bridge.claude_runner import CLAUDE_EFFORT, CLAUDE_MODEL, ClaudeRunner
 from bridge.config import Settings
 from bridge.queue import JobQueue
 from bridge.worker import Worker
@@ -61,6 +61,10 @@ def update(text: str) -> dict:
 
 
 class ClaudeRouterTests(unittest.TestCase):
+    def test_claude_constants(self) -> None:
+        self.assertEqual(CLAUDE_MODEL, "claude-opus-5")
+        self.assertEqual(CLAUDE_EFFORT, "medium")
+
     def test_claude_command_enqueues_claude_provider_without_meeting_room(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)
@@ -103,7 +107,15 @@ class ClaudeRouterTests(unittest.TestCase):
 
             self.assertEqual(
                 captured["argv"],
-                ["claude", "-p", "report status"],
+                [
+                    "claude",
+                    "-p",
+                    "report status",
+                    "--model",
+                    "claude-opus-5",
+                    "--effort",
+                    "medium",
+                ],
             )
             self.assertEqual(captured["kwargs"]["cwd"], str(settings.default_workspace))
             self.assertFalse(captured["kwargs"]["shell"])
@@ -111,6 +123,41 @@ class ClaudeRouterTests(unittest.TestCase):
             self.assertNotIn("--channels", captured["argv"])
             self.assertTrue(outcome.succeeded)
             self.assertEqual(outcome.report["summary"], "CLAUDE_OK")
+
+    def test_claude_runner_command_uses_explicit_model_and_effort_if_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            job = queue.submit(
+                chat_id="42",
+                prompt="custom run",
+                workspace=settings.default_workspace,
+                provider="claude",
+                model="claude-sonnet-4-6",
+                effort="high",
+            )
+            runner = ClaudeRunner(settings)
+            argv = runner.command_for(job)
+            self.assertEqual(
+                argv,
+                [
+                    "claude",
+                    "-p",
+                    "custom run",
+                    "--model",
+                    "claude-sonnet-4-6",
+                    "--effort",
+                    "high",
+                ],
+            )
+
+    def test_claude_runner_environment_and_credential_redaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            child_env = settings.claude_environment()
+            self.assertNotIn("TELEGRAM_BOT_TOKEN", child_env)
+            self.assertNotIn("MEETING_API_TOKEN", child_env)
+            self.assertNotIn("MCP_BEARER_TOKEN", child_env)
 
     def test_worker_dispatches_claude_and_success_is_auto_notified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

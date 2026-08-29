@@ -105,6 +105,8 @@ class GitHubReportPublisher:
         return "\n".join(lines)
 
     def publish(self, workflow: Workflow, jobs: list[Job]) -> str:
+        if not workflow.external_publication_enabled:
+            raise GitHubReportError("GitHub report upload is disabled for this workflow")
         if not self.settings.github_report_enabled:
             raise GitHubReportError("GitHub report upload is disabled")
         repository = self._repository(workflow.workspace)

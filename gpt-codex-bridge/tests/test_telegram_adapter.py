@@ -72,6 +72,27 @@ class TelegramAdapterTests(unittest.TestCase):
             self.assertIn("queued", client.sent[-1][1])
             self.assertEqual(queue.claim_next().sandbox_mode, "workspace-write")
 
+    def test_authorized_run_reports_running_workspace_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            client = FakeClient()
+            adapter = TelegramAdapter(settings, queue, client)
+            running = queue.submit(
+                chat_id=42,
+                prompt="existing workspace task",
+                workspace=settings.default_workspace,
+            )
+            queue.claim_next()
+
+            reply = adapter.handle_update(update("/run start another task"))
+
+            self.assertIn("尚未派送", reply)
+            self.assertIn(running.id, reply)
+            self.assertEqual(queue.counts()["running"], 1)
+            self.assertEqual(queue.counts()["queued"], 0)
+            self.assertEqual(client.sent[-1], ("42", reply))
+
     def test_gpt_starts_automated_workflow_without_meeting_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)
@@ -96,6 +117,30 @@ class TelegramAdapterTests(unittest.TestCase):
             self.assertEqual(jobs[0].prompt, "inspect telegram.py")
             self.assertEqual(jobs[0].sandbox_mode, "workspace-write")
             self.assertEqual(client.sent[-1], ("42", reply))
+
+    def test_gpt_smoke_persists_no_external_write_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            adapter = TelegramAdapter(settings, queue, FakeClient())
+
+            reply = adapter.handle_update(update("/gpt-smoke inspect safely"))
+            workflow_id = reply.splitlines()[0].split()[-1]
+            workflow = queue.get_workflow(workflow_id)
+
+            self.assertFalse(workflow.external_publication_enabled)
+            self.assertIn("no-external-write", reply)
+
+    def test_gpt_malformed_no_external_write_flag_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            adapter = TelegramAdapter(settings, queue, FakeClient())
+
+            reply = adapter.handle_update(update("/gpt --no-external-write=false inspect"))
+
+            self.assertIn("workflow 已拒絕", reply)
+            self.assertEqual(queue.recent_workflows_for_chat("42"), [])
 
     def test_gpt_reports_running_codex_job_without_enqueuing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

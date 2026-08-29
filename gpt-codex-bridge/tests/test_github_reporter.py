@@ -65,6 +65,31 @@ class GitHubReportPublisherTests(unittest.TestCase):
             content_arg = next(value for value in calls[-1] if value.startswith("content="))
             self.assertNotIn("bot-secret", content_arg)
 
+    def test_no_external_write_policy_blocks_writer_when_global_reporting_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            settings = Settings.from_env(
+                {
+                    "CODEX_ALLOWED_WORKSPACES": str(workspace),
+                    "CODEX_DEFAULT_WORKSPACE": str(workspace),
+                    "GITHUB_REPORT_ENABLED": "true",
+                },
+                root_dir=Path(__file__).resolve().parents[1],
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(args: list[str], **_: object) -> CompletedProcess[str]:
+                calls.append(args)
+                return CompletedProcess(args, 0, stdout="unexpected", stderr="")
+
+            workflow = Workflow(
+                "flow-0123456789abcdef", "42", "smoke", workspace, "running", "github", "now",
+                external_publication_enabled=False,
+            )
+            with self.assertRaisesRegex(Exception, "disabled for this workflow"):
+                GitHubReportPublisher(settings, run=fake_run).publish(workflow, [])
+            self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

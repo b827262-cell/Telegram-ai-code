@@ -10,7 +10,7 @@ import signal
 import subprocess
 from typing import Any, Callable
 
-from .codex_runner import RunOutcome, validate_report
+from .codex_runner import FAILURE_INVALID_REPORT, RunOutcome, validate_report
 from .config import Settings
 from .models import Job
 from .sandbox import validate_sandbox_mode
@@ -196,6 +196,7 @@ class AgyRunner:
                 stdout, stderr = process.communicate()
 
         exit_code = int(process.returncode if process.returncode is not None else -1)
+        invalid_report_failure = False
         if timed_out:
             report = self._report(
                 job,
@@ -221,6 +222,7 @@ class AgyRunner:
             try:
                 summary = parse_agy_json(stdout)
             except AgyOutputError:
+                invalid_report_failure = True
                 report = self._report(
                     job,
                     status="failed",
@@ -235,4 +237,10 @@ class AgyRunner:
                     needs_attention=False,
                 )
         self._write_report(report_path, report)
-        return RunOutcome(report_path, report, exit_code, timed_out=timed_out)
+        return RunOutcome(
+            report_path,
+            report,
+            exit_code,
+            timed_out=timed_out,
+            explicit_failure=FAILURE_INVALID_REPORT if invalid_report_failure else None,
+        )

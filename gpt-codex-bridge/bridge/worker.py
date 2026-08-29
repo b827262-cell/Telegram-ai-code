@@ -11,7 +11,7 @@ import time
 
 from .agy_runner import AgyRunner
 from .claude_runner import ClaudeRunner
-from .codex_runner import CodexRunner
+from .codex_runner import CodexRunner, describe_failure
 from .config import Settings
 from .github_reporter import GitHubReportError, GitHubReportPublisher
 from .models import Job
@@ -88,7 +88,7 @@ class Worker:
                 job.id,
                 succeeded=outcome.succeeded,
                 report_path=outcome.report_path,
-                error=None if outcome.succeeded else f"{job.provider.title()} job failed",
+                error=None if outcome.succeeded else describe_failure(job.provider, outcome),
                 exit_code=outcome.exit_code,
             )
             workflow, _next_job, needs_github_report = self.queue.advance_workflow(

@@ -9,13 +9,35 @@ from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
 DEFAULT_PROVIDER = "codex"
 SUPPORTED_PROVIDERS = frozenset({"agy", "codex", "claude"})
+DEFAULT_EXECUTION_KIND = "bridge"
+DC_EXECUTION_KIND = "dc"
+SUPPORTED_EXECUTION_KINDS = frozenset({DEFAULT_EXECUTION_KIND, DC_EXECUTION_KIND})
 WORKFLOW_STAGES = ("gpt", "agy", "claude")
+
+
+def validate_external_publication_enabled(value: object) -> bool:
+    """Accept only an explicit boolean workflow publication policy.
+
+    A malformed value must never be interpreted as permission to publish an
+    external report. Database callers use the same rule before invoking the
+    GitHub writer.
+    """
+
+    if type(value) is not bool:
+        raise ValueError("external publication policy must be a boolean")
+    return value
 
 
 def validate_provider(provider: str) -> str:
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"unsupported job provider: {provider}")
     return provider
+
+
+def validate_execution_kind(execution_kind: str) -> str:
+    if execution_kind not in SUPPORTED_EXECUTION_KINDS:
+        raise ValueError(f"unsupported execution kind: {execution_kind}")
+    return execution_kind
 
 
 @dataclass(frozen=True)
@@ -36,10 +58,18 @@ class Job:
     workflow_id: str | None = None
     workflow_stage: str | None = None
     workflow_order: int | None = None
+    execution_kind: str = DEFAULT_EXECUTION_KIND
+    pid: int | None = None
+    device_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    idempotency_key: str | None = None
+    attempts: int = 0
 
     def __post_init__(self) -> None:
         validate_sandbox_mode(self.sandbox_mode)
         validate_provider(self.provider)
+        validate_execution_kind(self.execution_kind)
 
     @property
     def runner(self) -> str:
@@ -72,6 +102,13 @@ class Job:
                 if data.get("workflow_order") is not None
                 else None
             ),
+            execution_kind=data.get("execution_kind", DEFAULT_EXECUTION_KIND),
+            pid=int(data["pid"]) if data.get("pid") is not None else None,
+            device_id=data.get("device_id"),
+            model=data.get("model"),
+            effort=data.get("effort"),
+            idempotency_key=data.get("idempotency_key"),
+            attempts=int(data.get("attempts", 0) or 0),
         )
 
 
@@ -88,10 +125,14 @@ class Workflow:
     github_url: str | None = None
     github_status: str | None = None
     error: str | None = None
+    external_publication_enabled: bool = True
 
     @classmethod
     def from_row(cls, row: object) -> "Workflow":
         data = dict(row)
+        raw_external_publication = data.get("external_publication_enabled", 1)
+        if raw_external_publication not in (0, 1, False, True):
+            raise ValueError("persisted external publication policy is invalid")
         return cls(
             id=data["id"],
             chat_id=str(data["chat_id"]),
@@ -104,6 +145,7 @@ class Workflow:
             github_url=data.get("github_url"),
             github_status=data.get("github_status"),
             error=data.get("error"),
+            external_publication_enabled=bool(raw_external_publication),
         )
 
 
